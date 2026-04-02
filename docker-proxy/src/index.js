@@ -1237,15 +1237,266 @@ async function searchInterface() {
     return html;
 }
 
+/**
+ * 生成海外访问禁止的友好提示页面
+ * @param {string} countryCode 用户所在国家代码
+ */
+function generateBlockPage(countryCode) {
+    return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>访问受限 | Access Restricted</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: 'Space Grotesk', -apple-system, BlinkMacSystemFont, sans-serif;
+    background: #0a0e1a;
+    color: #e0e6f0;
+    overflow: hidden;
+    position: relative;
+  }
+
+  /* 静态网格背景 */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background:
+      linear-gradient(90deg, rgba(56, 189, 248, 0.03) 1px, transparent 1px),
+      linear-gradient(rgba(56, 189, 248, 0.03) 1px, transparent 1px);
+    background-size: 60px 60px;
+  }
+
+  /* 渐变光晕 */
+  .glow {
+    position: fixed;
+    border-radius: 50%;
+    filter: blur(80px);
+    opacity: 0.15;
+    pointer-events: none;
+  }
+  .glow-1 {
+    width: 500px; height: 500px;
+    background: radial-gradient(circle, #f43f5e, transparent 70%);
+    top: -10%; left: -5%;
+  }
+  .glow-2 {
+    width: 400px; height: 400px;
+    background: radial-gradient(circle, #6366f1, transparent 70%);
+    bottom: -10%; right: -5%;
+  }
+
+  .container {
+    position: relative;
+    z-index: 1;
+    max-width: 520px;
+    width: 90%;
+    text-align: center;
+    animation: fadeInUp 0.8s ease-out;
+  }
+
+  @keyframes fadeInUp {
+    from { opacity: 0; transform: translateY(40px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  /* 盾牌图标 */
+  .shield {
+    width: 80px; height: 80px;
+    margin: 0 auto 32px;
+    position: relative;
+  }
+  .shield svg {
+    width: 100%; height: 100%;
+    filter: drop-shadow(0 0 20px rgba(244, 63, 94, 0.3));
+  }
+
+  h1 {
+    font-size: 1.75rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    margin-bottom: 12px;
+    background: linear-gradient(135deg, #f8fafc, #94a3b8);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  .subtitle {
+    font-size: 1rem;
+    color: #64748b;
+    margin-bottom: 36px;
+    line-height: 1.6;
+  }
+
+  /* 信息卡片 */
+  .info-card {
+    background: rgba(255, 255, 255, 0.04);
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 16px;
+    padding: 28px 24px;
+    margin-bottom: 28px;
+    text-align: left;
+  }
+
+  .info-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 0;
+  }
+  .info-row + .info-row {
+    border-top: 1px solid rgba(255, 255, 255, 0.05);
+  }
+
+  .info-icon {
+    width: 36px; height: 36px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    font-size: 1rem;
+  }
+  .info-icon.region { background: rgba(244, 63, 94, 0.12); }
+  .info-icon.hint   { background: rgba(99, 102, 241, 0.12); }
+
+  .info-label {
+    font-size: 0.8rem;
+    color: #475569;
+    margin-bottom: 2px;
+  }
+  .info-value {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: #cbd5e1;
+  }
+
+  /* 提示文字 */
+  .tip {
+    font-size: 0.85rem;
+    color: #475569;
+    line-height: 1.7;
+    margin-bottom: 32px;
+  }
+  .tip strong {
+    color: #6366f1;
+    font-weight: 600;
+  }
+
+  /* 返回按钮 */
+  .back-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 28px;
+    border-radius: 12px;
+    border: 1px solid rgba(99, 102, 241, 0.3);
+    background: rgba(99, 102, 241, 0.08);
+    color: #a5b4fc;
+    font-family: inherit;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    text-decoration: none;
+  }
+  .back-btn:hover {
+    background: rgba(99, 102, 241, 0.18);
+    border-color: rgba(99, 102, 241, 0.5);
+    transform: translateY(-2px);
+    box-shadow: 0 8px 24px rgba(99, 102, 241, 0.15);
+  }
+
+  .footer {
+    margin-top: 48px;
+    font-size: 0.75rem;
+    color: #334155;
+    letter-spacing: 0.05em;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+</style>
+</head>
+<body>
+  <div class="glow glow-1"></div>
+  <div class="glow glow-2"></div>
+
+  <div class="container">
+    <div class="shield">
+      <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M12 2L3 7v5c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V7l-9-5z"
+              fill="rgba(244,63,94,0.1)" stroke="#f43f5e" stroke-width="1.5" stroke-linejoin="round"/>
+        <path d="M9.5 12.5L11 14l3.5-4" stroke="#f43f5e" stroke-width="1.8"
+              stroke-linecap="round" stroke-linejoin="round" opacity="0.5"/>
+        <line x1="8" y1="8" x2="16" y2="16" stroke="#f43f5e" stroke-width="1.8" stroke-linecap="round"/>
+        <line x1="16" y1="8" x2="8" y2="16" stroke="#f43f5e" stroke-width="1.8" stroke-linecap="round"/>
+      </svg>
+    </div>
+
+    <h1>访问受限</h1>
+    <p class="subtitle">本服务仅限中国大陆地区访问</p>
+
+    <div class="info-card">
+      <div class="info-row">
+        <div class="info-icon region">🌍</div>
+        <div>
+          <div class="info-label">检测到您的地区</div>
+          <div class="info-value">${countryCode || 'Unknown'}</div>
+        </div>
+      </div>
+      <div class="info-row">
+        <div class="info-icon hint">💡</div>
+        <div>
+          <div class="info-label">服务说明</div>
+          <div class="info-value">此代理服务为大陆用户加速设计</div>
+        </div>
+      </div>
+    </div>
+
+    <p class="tip">
+      海外用户可直接访问 <strong>Docker Hub 官方源</strong>，无需通过本代理。
+    </p>
+
+    <a class="back-btn" href="https://hub.docker.com" target="_blank">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+        <polyline points="15 3 21 3 21 9"/>
+        <line x1="10" y1="14" x2="21" y2="3"/>
+      </svg>
+      前往 Docker Hub 官方
+    </a>
+
+    <div class="footer">POWERED BY CLOUDFLARE WORKERS</div>
+  </div>
+</body>
+</html>`;
+}
+
 export default {
     async fetch(request, env, ctx) {
         // ===== 禁止海外访问 =====
         const country = request.cf?.country;
         const allowedCountries = ['CN']; // 只允许中国大陆，如需港澳台可加 'HK', 'MO', 'TW'
         if (country && !allowedCountries.includes(country)) {
-            return new Response('Access denied', {
+            return new Response(generateBlockPage(country), {
                 status: 403,
-                headers: { 'Content-Type': 'text/plain; charset=UTF-8' }
+                headers: { 'Content-Type': 'text/html; charset=UTF-8' }
             });
         }
         // ===== 禁止海外访问 END =====
