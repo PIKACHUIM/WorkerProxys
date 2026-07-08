@@ -1236,7 +1236,7 @@ function serveDNSEncodingExplanation() {
           footer: "DoH Proxy — Powered by Cloudflare Workers"
         },
         zh: {
-          page_title: "Cloudflare DOH 代理服务",
+          page_title: "Public DOH 代理服务",
           badge: "DNS 编码",
           title: "DNS-over-HTTPS 中的 DNS 查询编码",
           subtitle: "了解为什么 DoH GET 请求中的 DNS 查询必须进行 base64url 编码",
