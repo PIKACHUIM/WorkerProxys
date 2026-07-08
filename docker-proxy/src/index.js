@@ -1488,18 +1488,47 @@ function generateBlockPage(countryCode) {
 </html>`;
 }
 
+
+// ── Geo helpers (ALLOW_AREA env var) ──────────────────────────────────────
+function getCountry(request) {
+    // Cloudflare Workers native binding (most reliable)
+    if (request.cf?.country) return request.cf.country.toUpperCase();
+    // Header fallbacks: EdgeOne / ESA / generic CDN
+    const headers = [
+        'EO-Client-IP-Country',      // Tencent EdgeOne
+        'X-EdgeOne-Client-Country',
+        'X-Geo-Country',             // Alibaba ESA
+        'X-Alibaba-Client-Country',
+        'CF-IPCountry',              // Cloudflare header form
+        'X-Country-Code',
+        'X-Client-Country',
+        'X-Real-IP-Country',
+    ];
+    for (const h of headers) {
+        const v = request.headers.get(h);
+        if (v && v.trim()) return v.trim().toUpperCase();
+    }
+    return 'unknown';
+}
+
+function isAllowedRegion(country, allowArea) {
+    if (!allowArea || !allowArea.trim()) return true;          // no restriction
+    if (country === 'unknown') return true;                    // local dev / CI
+    const allowed = allowArea.toUpperCase().split(',').map(s => s.trim()).filter(Boolean);
+    return allowed.includes(country);
+}
+// ── Geo helpers END ────────────────────────────────────────────────────────
 export default {
     async fetch(request, env, ctx) {
-        // ===== 禁止海外访问 =====
-        const country = request.cf?.country;
-        const allowedCountries = ['CN']; // 只允许中国大陆，如需港澳台可加 'HK', 'MO', 'TW'
-        if (country && !allowedCountries.includes(country)) {
+        // ===== 访问地区限制 (ALLOW_AREA env var) =====
+        const country = getCountry(request);
+        if (!isAllowedRegion(country, env.ALLOW_AREA)) {
             return new Response(generateBlockPage(country), {
                 status: 403,
                 headers: { 'Content-Type': 'text/html; charset=UTF-8' }
             });
         }
-        // ===== 禁止海外访问 END =====
+        // ===== 访问地区限制 END =====
 
         const getReqHeader = (key) => request.headers.get(key); // 获取请求头
 

@@ -3,6 +3,10 @@
   "name": "dockerfs-page",
   "main": "src/index.js",
   "compatibility_date": "2025-09-23",
-  "compatibility_flags": ["nodejs_compat"],
-  "vars": {}
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "vars": {
+    "ALLOW_AREA": "CN,HK"
+  }
 }

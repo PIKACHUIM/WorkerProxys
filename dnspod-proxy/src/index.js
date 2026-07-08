@@ -64,6 +64,30 @@ const DOH_PROVIDERS = [
 // Cache TTL in seconds (5 minutes)
 const CACHE_TTL = 300;
 
+
+// ── Geo helpers (ALLOW_AREA env var) ──────────────────────────────────────
+function getCountry(request) {
+    if (request.cf?.country) return request.cf.country.toUpperCase();
+    const headers = [
+        'EO-Client-IP-Country', 'X-EdgeOne-Client-Country',
+        'X-Geo-Country', 'X-Alibaba-Client-Country',
+        'CF-IPCountry', 'X-Country-Code', 'X-Client-Country', 'X-Real-IP-Country',
+    ];
+    for (const h of headers) {
+        const v = request.headers.get(h);
+        if (v && v.trim()) return v.trim().toUpperCase();
+    }
+    return 'unknown';
+}
+
+function isAllowedRegion(country, allowArea) {
+    if (!allowArea || !allowArea.trim()) return true;
+    if (country === 'unknown') return true;
+    const allowed = allowArea.toUpperCase().split(',').map(s => s.trim()).filter(Boolean);
+    return allowed.includes(country);
+}
+// ── Geo helpers END ────────────────────────────────────────────────────────
+
 export default {
     async fetch(request, env, ctx) {
         return handleRequest(request, env, ctx);
@@ -71,16 +95,15 @@ export default {
 };
 
 async function handleRequest(request, env, ctx) {
-    // ===== 禁止海外访问 =====
-    const country = request.cf?.country;
-    const allowedCountries = ['CN']; // 只允许中国大陆，如需港澳台可加 'HK', 'MO', 'TW'
-    if (country && !allowedCountries.includes(country)) {
+    // ===== 访问地区限制 (ALLOW_AREA env var) =====
+    const country = getCountry(request);
+    if (!isAllowedRegion(country, env.ALLOW_AREA)) {
         return new Response(generateBlockPage(country), {
             status: 403,
             headers: { 'Content-Type': 'text/html; charset=UTF-8' }
         });
     }
-    // ===== 禁止海外访问 END =====
+    // ===== 访问地区限制 END =====
 
     const url = new URL(request.url);
 
@@ -1016,7 +1039,7 @@ Access-Control-Allow-Headers: Content-Type, Accept</div>
           copy_fail: "Copy failed. Please copy manually."
         },
         zh: {
-          page_title: "Cloudflare DOH 代理服务",
+          page_title: "Public DOH 代理服务",
           badge: "DNS-OVER-HTTPS 代理",
           title: "高性能 DoH 代理",
           subtitle: "基于 Cloudflare Worker 的 DNS 代理服务，支持多提供商负载均衡、自动故障转移和内置广告拦截。",
