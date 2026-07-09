@@ -1,9 +1,30 @@
 // _worker.js
 
-// Docker镜像仓库主机地址
+// Docker镜像仓库主机地址 (默认值，运行时会被 env.PROXY_URLS 或子域名路由覆盖)
 let hub_host = 'registry-1.docker.io';
-// Docker认证服务器地址
+// Docker认证服务器地址 (仅用于 docker.io 的默认值)
 const auth_url = 'https://auth.docker.io';
+
+/**
+ * 根据镜像仓库主机名获取对应的认证服务器地址
+ * @param {string} registryHost 镜像仓库主机名
+ * @returns {string} 认证服务器 URL
+ */
+function getRegistryAuthUrl(registryHost) {
+    if (registryHost === 'registry-1.docker.io') return 'https://auth.docker.io';
+    // 其他仓库（ghcr.io, gcr.io, quay.io 等）使用自身作为认证端点
+    return `https://${registryHost}`;
+}
+
+/**
+ * 根据镜像仓库主机名获取 token 请求中的 service 参数
+ * @param {string} registryHost 镜像仓库主机名
+ * @returns {string} service 名称
+ */
+function getRegistryService(registryHost) {
+    if (registryHost === 'registry-1.docker.io') return 'registry.docker.io';
+    return registryHost;
+}
 
 let 屏蔽爬虫UA = ['netcraft'];
 
@@ -1538,6 +1559,12 @@ export default {
         if (env.UA) 屏蔽爬虫UA = 屏蔽爬虫UA.concat(await ADD(env.UA));
         const workers_url = `https://${url.hostname}`;
 
+        // 从环境变量 PROXY_URLS 读取默认代理目标（逗号分隔时取第一个）
+        // 这将作为 hub_host 的默认值，可能会被 ns 参数或子域名路由覆盖
+        if (env.PROXY_URLS) {
+            hub_host = env.PROXY_URLS.split(',')[0].trim();
+        }
+
         // 获取请求参数中的 ns
         const ns = url.searchParams.get('ns');
         const hostname = url.searchParams.get('hubhost') || url.hostname;
@@ -1693,11 +1720,12 @@ export default {
             console.log(`handle_url: ${url}`);
         }
 
-        // 处理token请求
+        // 处理token请求（动态选择认证服务器，支持 ghcr.io 等多种仓库）
         if (url.pathname.includes('/token')) {
+            const currentAuthUrl = getRegistryAuthUrl(hub_host);
             let token_parameter = {
                 headers: {
-                    'Host': 'auth.docker.io',
+                    'Host': new URL(currentAuthUrl).hostname,
                     'User-Agent': getReqHeader("User-Agent"),
                     'Accept': getReqHeader("Accept"),
                     'Accept-Language': getReqHeader("Accept-Language"),
@@ -1706,7 +1734,7 @@ export default {
                     'Cache-Control': 'max-age=0'
                 }
             };
-            let token_url = auth_url + url.pathname + url.search;
+            let token_url = currentAuthUrl + url.pathname + url.search;
             return fetch(new Request(token_url, request), token_parameter);
         }
 
@@ -1734,7 +1762,10 @@ export default {
                 repo = v2Match[1];
             }
             if (repo) {
-                const tokenUrl = `${auth_url}/token?service=registry.docker.io&scope=repository:${repo}:pull`;
+                // 动态获取认证 URL 和 service 名称，支持不同的镜像仓库
+                const currentAuthUrl = getRegistryAuthUrl(hub_host);
+                const registryService = getRegistryService(hub_host);
+                const tokenUrl = `${currentAuthUrl}/token?service=${registryService}&scope=repository:${repo}:pull`;
                 const tokenRes = await fetch(tokenUrl, {
                     headers: {
                         'User-Agent': getReqHeader("User-Agent"),
@@ -1771,7 +1802,9 @@ export default {
                 let status = original_response.status;
                 if (new_response_headers.get("Www-Authenticate")) {
                     let auth = new_response_headers.get("Www-Authenticate");
-                    let re = new RegExp(auth_url, 'g');
+                    // 使用动态认证 URL 替换，支持 ghcr.io 等不同仓库的认证端点
+                    const currentAuthUrl = getRegistryAuthUrl(hub_host);
+                    let re = new RegExp(currentAuthUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g');
                     new_response_headers.set("Www-Authenticate", response_headers.get("Www-Authenticate").replace(re, workers_url));
                 }
                 if (new_response_headers.get("Location")) {
@@ -1819,10 +1852,11 @@ export default {
         let new_response_headers = new Headers(response_headers);
         let status = original_response.status;
 
-        // 修改 Www-Authenticate 头
+        // 修改 Www-Authenticate 头（使用动态认证 URL，支持 ghcr.io 等不同仓库）
         if (new_response_headers.get("Www-Authenticate")) {
             let auth = new_response_headers.get("Www-Authenticate");
-            let re = new RegExp(auth_url, 'g');
+            const currentAuthUrl = getRegistryAuthUrl(hub_host);
+            let re = new RegExp(currentAuthUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g');
             new_response_headers.set("Www-Authenticate", response_headers.get("Www-Authenticate").replace(re, workers_url));
         }
 
