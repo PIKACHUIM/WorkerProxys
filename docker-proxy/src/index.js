@@ -1862,19 +1862,44 @@ export default {
                 // 动态获取认证 URL 和 service 名称，支持不同的镜像仓库
                 const currentAuthUrl = getRegistryAuthUrl(hub_host);
                 const registryService = getRegistryService(hub_host);
-                const tokenUrl = `${currentAuthUrl}/token?service=${registryService}&scope=repository:${repo}:pull`;
-                const tokenRes = await fetch(tokenUrl, {
-                    headers: {
+
+                // ── Token 缓存（用 caches.default 避免每次请求都重新取 token，减轻 429）──
+                const tokenCacheKey = new Request(
+                    `https://tokencache.internal/${registryService}/${repo}`
+                );
+                const edgeCache = caches.default;
+                let token = null;
+                const cachedToken = await edgeCache.match(tokenCacheKey);
+                if (cachedToken) {
+                    const d = await cachedToken.json();
+                    token = d.token || d.access_token || null;
+                }
+                if (!token) {
+                    const tokenUrl = `${currentAuthUrl}/token?service=${registryService}&scope=repository:${repo}:pull`;
+                    const tokenHeaders = {
                         'User-Agent': getReqHeader("User-Agent"),
-                        'Accept': getReqHeader("Accept"),
-                        'Accept-Language': getReqHeader("Accept-Language"),
-                        'Accept-Encoding': getReqHeader("Accept-Encoding"),
+                        'Accept': 'application/json',
                         'Connection': 'keep-alive',
-                        'Cache-Control': 'max-age=0'
+                        'Cache-Control': 'no-cache'
+                    };
+                    // 支持 Docker Hub 账号认证，换取更高的速率限额（200次/6h vs 匿名100次/6h）
+                    // 在 wrangler.jsonc vars 里配置 DOCKER_USERNAME / DOCKER_PASSWORD 即可生效
+                    if (hub_host === 'registry-1.docker.io' && env.DOCKER_USERNAME && env.DOCKER_PASSWORD) {
+                        tokenHeaders['Authorization'] = 'Basic ' + btoa(env.DOCKER_USERNAME + ':' + env.DOCKER_PASSWORD);
                     }
-                });
-                const tokenData = await tokenRes.json();
-                const token = tokenData.token;
+                    const tokenRes = await fetch(tokenUrl, { headers: tokenHeaders });
+                    const tokenData = await tokenRes.json();
+                    token = tokenData.token || tokenData.access_token;
+                    // token 有效期通常 300s，缓存 240s 留冗余
+                    if (token) {
+                        const expiresIn = tokenData.expires_in || 300;
+                        const ttl = Math.max(60, expiresIn - 60);
+                        ctx.waitUntil(edgeCache.put(tokenCacheKey, new Response(
+                            JSON.stringify({ token }),
+                            { headers: { 'Cache-Control': `max-age=${ttl}`, 'Content-Type': 'application/json' } }
+                        )));
+                    }
+                }
                 let parameter = {
                     headers: {
                         'Host': hub_host,
@@ -1886,7 +1911,16 @@ export default {
                         'Cache-Control': 'max-age=0',
                         'Authorization': `Bearer ${token}`
                     },
-                    cacheTtl: 3600
+                    // cacheTtl 必须放在 cf:{} 里才能让 Cloudflare 边缘缓存生效
+                    cf: {
+                        // blob 内容寻址(sha256)，永不变化；manifest by digest 同理；tag 可能更新用短缓存
+                        cacheTtl: url.pathname.includes('/blobs/sha256:')
+                            ? 86400        // blob: 24h（内容不变，永久可用）
+                            : url.pathname.includes('/manifests/sha256:')
+                                ? 3600     // manifest by digest: 1h
+                                : 300,     // manifest by tag / tags/list: 5min
+                        cacheEverything: true
+                    }
                 };
                 if (request.headers.has("X-Amz-Content-Sha256")) {
                     parameter.headers['X-Amz-Content-Sha256'] = getReqHeader("X-Amz-Content-Sha256");
@@ -1928,7 +1962,15 @@ export default {
                 'Connection': 'keep-alive',
                 'Cache-Control': 'max-age=0'
             },
-            cacheTtl: 3600 // 缓存时间
+            // cacheTtl 必须放在 cf:{} 里才能让 Cloudflare 边缘缓存生效
+            cf: {
+                cacheTtl: url.pathname.includes('/blobs/sha256:')
+                    ? 86400
+                    : url.pathname.includes('/manifests/sha256:')
+                        ? 3600
+                        : 300,
+                cacheEverything: true
+            }
         };
 
         // 添加Authorization头

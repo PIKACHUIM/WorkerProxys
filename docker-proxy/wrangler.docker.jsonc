@@ -21,6 +21,15 @@
     //   nvcr.io               → NVIDIA NGC
     //   docker.cloudsmith.io  → Cloudsmith
     "PROXY_URLS": "registry-1.docker.io",
-    "ALLOW_AREA": "CN,HK"
+    "ALLOW_AREA": "CN,HK",
+    // ── 解决 429 Too Many Requests ────────────────────────────────────────
+    // Docker Hub 免费账号：200次拉取/6h（匿名 IP 只有 100次/6h）
+    // Pro 账号无限制。配置后 token 将通过账号认证获取，有效降低 429 概率。
+    // 建议通过 wrangler secret put 命令而非明文写在这里：
+    //   wrangler secret put DOCKER_USERNAME
+    //   wrangler secret put DOCKER_PASSWORD
+    // 如果暂时不需要，保持空字符串即可：
+    "DOCKER_USERNAME": "",
+    "DOCKER_PASSWORD": ""
   }
 }

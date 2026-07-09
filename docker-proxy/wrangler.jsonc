@@ -7,20 +7,23 @@
     "nodejs_compat"
   ],
   "vars": {
-    // PROXY_URLS: 默认代理目标镜像仓库（逗号分隔时取第一个作为默认值）
-    // 访问不同仓库时，通过子域名路由（如 ghcr.yourworker.dev 代理 ghcr.io）
-    // 也可通过 ?ns=ghcr.io 参数指定目标仓库
-    //
-    // 支持的镜像仓库：
-    //   registry-1.docker.io  → Docker Hub (默认)
-    //   ghcr.io               → GitHub Container Registry
-    //   gcr.io                → Google Container Registry
-    //   k8s.gcr.io            → Kubernetes (旧)
-    //   registry.k8s.io       → Kubernetes (新)
-    //   quay.io               → Red Hat Quay
-    //   nvcr.io               → NVIDIA NGC
-    //   docker.cloudsmith.io  → Cloudsmith
+    // PROXY_URLS: 默认代理目标（逗号分隔时取第一个）
+    // 子域名路由：ghcr.* → ghcr.io  gcr.* → gcr.io  quay.* → quay.io  ...
+    // 支持: registry-1.docker.io / ghcr.io / gcr.io / k8s.gcr.io /
+    //        registry.k8s.io / quay.io / nvcr.io / docker.cloudsmith.io
     "PROXY_URLS": "registry-1.docker.io",
-    "ALLOW_AREA": "CN,HK"
+
+    // ALLOW_AREA: 允许访问的国家/地区代码（逗号分隔），留空则不限制
+    "ALLOW_AREA": "CN,HK",
+
+    // ── 解决 429 Too Many Requests ────────────────────────────────────────
+    // Docker Hub 免费账号：200次拉取/6h（匿名 IP 只有 100次/6h）
+    // Pro 账号无限制。配置后 token 将通过账号认证获取，有效降低 429 概率。
+    // 建议通过 wrangler secret put 命令而非明文写在这里：
+    //   wrangler secret put DOCKER_USERNAME
+    //   wrangler secret put DOCKER_PASSWORD
+    // 如果暂时不需要，保持空字符串即可：
+    "DOCKER_USERNAME": "",
+    "DOCKER_PASSWORD": ""
   }
 }
