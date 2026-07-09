@@ -1,0 +1,26 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ghcriofs-page",
+  "main": "src/index.js",
+  "compatibility_date": "2025-09-23",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "vars": {
+    // PROXY_URLS: 默认代理目标镜像仓库（逗号分隔时取第一个作为默认值）
+    // 访问不同仓库时，通过子域名路由（如 ghcr.yourworker.dev 代理 ghcr.io）
+    // 也可通过 ?ns=ghcr.io 参数指定目标仓库
+    //
+    // 支持的镜像仓库：
+    //   registry-1.docker.io  → Docker Hub (默认)
+    //   ghcr.io               → GitHub Container Registry
+    //   gcr.io                → Google Container Registry
+    //   k8s.gcr.io            → Kubernetes (旧)
+    //   registry.k8s.io       → Kubernetes (新)
+    //   quay.io               → Red Hat Quay
+    //   nvcr.io               → NVIDIA NGC
+    //   docker.cloudsmith.io  → Cloudsmith
+    "PROXY_URLS": "ghcr.io",
+    "ALLOW_AREA": "CN,HK"
+  }
+}

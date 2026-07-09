@@ -116,12 +116,24 @@ async function nginx() {
     return text;
 }
 
-async function searchInterface() {
+async function searchInterface(registryHost) {
+    // 仓库元信息映射
+    const REGISTRY_MAP = {
+        'registry-1.docker.io': { nameZh: 'Docker Hub',               nameEn: 'Docker Hub',                     searchType: 'dockerhub' },
+        'ghcr.io':              { nameZh: 'GitHub 容器镜像库',         nameEn: 'GitHub Container Registry',      searchType: 'github'    },
+        'gcr.io':               { nameZh: 'Google 容器镜像库',         nameEn: 'Google Container Registry',      searchType: 'none'      },
+        'k8s.gcr.io':           { nameZh: 'Kubernetes 镜像库',         nameEn: 'Kubernetes Registry',            searchType: 'none'      },
+        'registry.k8s.io':      { nameZh: 'Kubernetes 镜像库',         nameEn: 'Kubernetes Registry',            searchType: 'none'      },
+        'quay.io':              { nameZh: 'Red Hat Quay',              nameEn: 'Red Hat Quay',                   searchType: 'none'      },
+        'nvcr.io':              { nameZh: 'NVIDIA NGC',                nameEn: 'NVIDIA NGC',                     searchType: 'none'      },
+        'docker.cloudsmith.io': { nameZh: 'Cloudsmith',               nameEn: 'Cloudsmith',                     searchType: 'none'      },
+    };
+    const regInfo = REGISTRY_MAP[registryHost] || { nameZh: registryHost, nameEn: registryHost, searchType: 'none' };
     const html = `
 	<!DOCTYPE html>
 	<html lang="zh-CN">
 	<head>
-		<title>Cloudflare Docker Hub 镜像代理</title>
+		<title>Cloudflare ${regInfo.nameZh} 镜像代理</title>
 		<meta charset="UTF-8">
 		<meta name="viewport" content="width=device-width, initial-scale=1.0">
 		<link rel="preconnect" href="https://fonts.googleapis.com">
@@ -811,6 +823,11 @@ async function searchInterface() {
 
 		<script>
 		var CURRENT_HOST = window.location.hostname;
+		// 由服务端注入的仓库信息
+		var REGISTRY_HOST = '${registryHost}';
+		var REGISTRY_NAME_ZH = '${regInfo.nameZh}';
+		var REGISTRY_NAME_EN = '${regInfo.nameEn}';
+		var REGISTRY_SEARCH_TYPE = '${regInfo.searchType}'; // dockerhub | github | none
 		var currentPage = 1;
 		var currentQuery = '';
 		var totalResults = 0;
@@ -930,7 +947,24 @@ async function searchInterface() {
 			return text;
 		}
 
-		function setLang(lang) {
+		// 根据代理仓库动态更新 i18n 标题
+		function applyRegistryI18n() {
+			I18N.zh['page.title']   = REGISTRY_NAME_ZH + ' 镜像代理';
+			I18N.zh['header.title'] = REGISTRY_NAME_ZH + ' 镜像代理';
+			I18N.zh['header.desc']  = '基于 Cloudflare 边缘网络加速的 ' + REGISTRY_NAME_ZH + ' 镜像代理服务<br/>快速拉取所需容器镜像';
+			I18N.en['page.title']   = REGISTRY_NAME_EN + ' Mirror Proxy';
+			I18N.en['header.title'] = REGISTRY_NAME_EN + ' Mirror Proxy';
+			I18N.en['header.desc']  = REGISTRY_NAME_EN + ' mirror proxy powered by Cloudflare edge network<br/>Pull container images at full speed';
+			// 搜索框占位符
+			if (REGISTRY_SEARCH_TYPE === 'github') {
+				I18N.zh['search.placeholder'] = '搜索 ' + REGISTRY_NAME_ZH + ' 镜像（通过 GitHub 仓库搜索）...';
+				I18N.en['search.placeholder'] = 'Search ' + REGISTRY_NAME_EN + ' images (via GitHub repo search)...';
+			} else if (REGISTRY_SEARCH_TYPE === 'none') {
+				I18N.zh['search.placeholder'] = REGISTRY_NAME_ZH + ' 不支持镜像搜索';
+				I18N.en['search.placeholder'] = REGISTRY_NAME_EN + ' does not support image search';
+			}
+		}
+				function setLang(lang) {
 			if (!I18N[lang]) return;
 			currentLang = lang;
 			localStorage.setItem('lang', lang);
@@ -1004,6 +1038,11 @@ async function searchInterface() {
 		async function performSearch(page) {
 			var query = document.getElementById('search-input').value.trim();
 			if (!query) return;
+			// 不支持搜索的仓库：直接提示
+			if (REGISTRY_SEARCH_TYPE === 'none') {
+				showSearchError(REGISTRY_NAME_ZH + ' 不支持镜像搜索功能');
+				return;
+			}
 			currentQuery = query;
 			document.getElementById('result-list').innerHTML = '';
 			document.getElementById('result-summary').textContent = '';
@@ -1015,31 +1054,88 @@ async function searchInterface() {
 			}
 			document.getElementById('loading').style.display = 'block';
 			try {
-				var pageSize = 5;
-				var res = await fetch('/v2/search?q=' + encodeURIComponent(query) + '&page=' + page + '&page_size=' + pageSize);
-				if (!res.ok) {
-					var errBody = '';
-					try { var ej = await res.json(); errBody = ej.detail || ej.error || ''; } catch(_){}
-					throw new Error(errBody || ('HTTP ' + res.status));
+				if (REGISTRY_SEARCH_TYPE === 'github') {
+					// ghcr.io：通过 GitHub REST API 搜索公开仓库
+					var perPage = 10;
+					var apiUrl = 'https://api.github.com/search/repositories?q=' +
+						encodeURIComponent(query) + '+is:public&per_page=' + perPage + '&page=' + page;
+					var res = await fetch(apiUrl, { headers: { 'Accept': 'application/vnd.github.v3+json' } });
+					if (!res.ok) throw new Error('GitHub API HTTP ' + res.status);
+					var data = await res.json();
+					document.getElementById('loading').style.display = 'none';
+					totalResults = data.total_count || 0;
+					var items = data.items || [];
+					if (items.length === 0 && page === 1) {
+						document.getElementById('no-results').style.display = 'block';
+						return;
+					}
+					var listEl = document.getElementById('result-list');
+					items.forEach(function(item){ listEl.appendChild(createGhcrResultCard(item)); });
+					currentPage = page;
+					var totalPages = Math.min(100, Math.ceil(totalResults / perPage)); // GitHub API 最多返回 1000 条
+					document.getElementById('result-summary').textContent = t('search.summary', {total: totalResults, page: page, pages: totalPages});
+					renderPagination(page, totalPages);
+				} else {
+					// Docker Hub
+					var pageSize = 5;
+					var res = await fetch('/v2/search?q=' + encodeURIComponent(query) + '&page=' + page + '&page_size=' + pageSize);
+					if (!res.ok) {
+						var errBody = '';
+						try { var ej = await res.json(); errBody = ej.detail || ej.error || ''; } catch(_){}
+						throw new Error(errBody || ('HTTP ' + res.status));
+					}
+					var data = await res.json();
+					document.getElementById('loading').style.display = 'none';
+					totalResults = data.num_results || 0;
+					var results = data.results || [];
+					if (results.length === 0 && page === 1) {
+						document.getElementById('no-results').style.display = 'block';
+						return;
+					}
+					var listEl = document.getElementById('result-list');
+					results.forEach(function(item){ listEl.appendChild(createResultCard(item)); });
+					currentPage = page;
+					var totalPages = Math.ceil(totalResults / pageSize);
+					document.getElementById('result-summary').textContent = t('search.summary', {total: totalResults, page: page, pages: totalPages});
+					renderPagination(page, totalPages);
 				}
-				var data = await res.json();
-				document.getElementById('loading').style.display = 'none';
-				totalResults = data.num_results || 0;
-				var results = data.results || [];
-				if (results.length === 0 && page === 1) {
-					document.getElementById('no-results').style.display = 'block';
-					return;
-				}
-				var listEl = document.getElementById('result-list');
-				results.forEach(function(item){ listEl.appendChild(createResultCard(item)); });
-				currentPage = page;
-				var totalPages = Math.ceil(totalResults / pageSize);
-				document.getElementById('result-summary').textContent = t('search.summary', {total: totalResults, page: page, pages: totalPages});
-				renderPagination(page, totalPages);
 			} catch (e) {
 				document.getElementById('loading').style.display = 'none';
 				showSearchError(e.message);
 			}
+		}
+
+		// ghcr.io 专用结果卡片（GitHub 仓库格式）
+		function createGhcrResultCard(item) {
+			var owner     = (item.owner && item.owner.login) || '';
+			var repo      = item.name || '';
+			var desc      = item.description || '';
+			var stars     = item.stargazers_count || 0;
+			var imageName = owner + '/' + repo;
+			var proxyImage = CURRENT_HOST + '/' + imageName;
+			var originalImage = 'ghcr.io/' + imageName;
+			var cardId = 'card-' + Math.random().toString(36).substr(2,8);
+			var card = document.createElement('div');
+			card.className = 'result-card';
+			var html = '<div class="result-header">' +
+				'<span class="result-name">' + escapeHtml(imageName) + '</span>' +
+				'<div class="result-badges">' +
+					'<span class="badge" style="background:rgba(51,51,51,0.2);color:#aaa;border:1px solid rgba(255,255,255,0.1)">GHCR</span>' +
+					(stars > 0 ? '<span class="badge badge-stars">★ ' + formatNum(stars) + '</span>' : '') +
+				'</div></div>';
+			if (desc) html += '<div class="result-desc">' + escapeHtml(desc) + '</div>';
+			html += '<div class="result-proxy-row">' +
+				'<span class="proxy-addr">' + escapeHtml(proxyImage) + '</span>' +
+				'<button class="copy-addr-btn" onclick="copyText(this,&#39;' + escapeAttr(proxyImage) + '&#39;)">' + t('btn.copy') + '</button>' +
+				'</div>';
+			html += '<button class="cmd-toggle" onclick="toggleCmd(this,&#39;' + cardId + '&#39;)">' +
+				'<svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6" stroke-linecap="round" stroke-linejoin="round"/></svg>' +
+				t('cmd.show') + '</button>';
+			html += '<div class="cmd-detail" id="' + cardId + '">' +
+				'<button class="copy-btn" onclick="copyCommands(this)">' + t('btn.copy') + '</button>' +
+				'<code>' + generateCommands(originalImage, proxyImage) + '</code></div>';
+			card.innerHTML = html;
+			return card;
 		}
 
 		function renderPagination(current, total) {
@@ -1232,7 +1328,8 @@ async function searchInterface() {
 
 		/* 页面加载初始化 */
 		window.addEventListener('load', function(){
-			/* 应用国际化 */
+			/* 先应用仓库名称到 i18n，再渲染 */
+			applyRegistryI18n();
 			applyI18n();
 			document.querySelectorAll('.lang-btn').forEach(function(b){
 				b.classList.toggle('active', b.getAttribute('data-lang') === currentLang);
@@ -1691,7 +1788,7 @@ export default {
                         });
                     } else return fetch(new Request(env.URL, request));
                 } else	{
-                    if (fakePage) return new Response(await searchInterface(), {
+                    if (fakePage) return new Response(await searchInterface(hub_host), {
                         headers: {
                             'Content-Type': 'text/html; charset=UTF-8',
                         },
