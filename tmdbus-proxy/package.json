@@ -1,0 +1,8 @@
+{
+  "name": "tmdb-proxy",
+  "type": "module",
+  "scripts": {
+    "dev": "edgeone pages:dev",
+    "deploy": "edgeone pages:deploy"
+  }
+}
