@@ -12,6 +12,7 @@
     // 支持: registry-1.docker.io / ghcr.io / gcr.io / k8s.gcr.io /
     //        registry.k8s.io / quay.io / nvcr.io / docker.cloudsmith.io
     "PROXY_URLS": "registry-1.docker.io",
+    "PROXY_BACK": "public.ecr.aws",
 
     // ALLOW_AREA: 允许访问的国家/地区代码（逗号分隔），留空则不限制
     "ALLOW_AREA": "CN,HK",

@@ -26,6 +26,21 @@ function getRegistryService(registryHost) {
     return registryHost;
 }
 
+/**
+ * 带备份源的 fetch：主源返回 429 / 5xx 时自动切换到 env.PROXY_BACK
+ */
+async function fetchWithFallback(url, request, parameter, env) {
+    const res = await fetch(new Request(url, request), parameter);
+    if (env?.PROXY_BACK && (res.status === 429 || res.status >= 500)) {
+        const backUrl = new URL(url.toString());
+        backUrl.hostname = env.PROXY_BACK;
+        const backParam = { ...parameter, headers: { ...parameter.headers, 'Host': env.PROXY_BACK } };
+        console.warn(`[fallback] ${res.status} from ${url.hostname} → ${env.PROXY_BACK}`);
+        return fetch(new Request(backUrl, request), backParam);
+    }
+    return res;
+}
+
 let 屏蔽爬虫UA = ['netcraft'];
 
 // 根据主机名选择对应的上游地址
@@ -1925,7 +1940,7 @@ export default {
                 if (request.headers.has("X-Amz-Content-Sha256")) {
                     parameter.headers['X-Amz-Content-Sha256'] = getReqHeader("X-Amz-Content-Sha256");
                 }
-                let original_response = await fetch(new Request(url, request), parameter);
+                let original_response = await fetchWithFallback(url, request, parameter, env);
                 let original_response_clone = original_response.clone();
                 let original_text = original_response_clone.body;
                 let response_headers = original_response.headers;
@@ -1984,7 +1999,7 @@ export default {
         }
 
         // 发起请求并处理响应
-        let original_response = await fetch(new Request(url, request), parameter);
+        let original_response = await fetchWithFallback(url, request, parameter, env);
         let original_response_clone = original_response.clone();
         let original_text = original_response_clone.body;
         let response_headers = original_response.headers;

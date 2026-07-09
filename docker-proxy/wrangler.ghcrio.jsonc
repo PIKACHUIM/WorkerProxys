@@ -21,7 +21,11 @@
     //   nvcr.io               → NVIDIA NGC
     //   docker.cloudsmith.io  → Cloudsmith
     "PROXY_URLS": "ghcr.io",
+    "PROXY_BACK": "ghcr.nju.edu.cn",
+
+    // ALLOW_AREA: 允许访问的国家/地区代码（逗号分隔），留空则不限制
     "ALLOW_AREA": "CN,HK",
+
     // ── 解决 429 Too Many Requests ────────────────────────────────────────
     // Docker Hub 免费账号：200次拉取/6h（匿名 IP 只有 100次/6h）
     // Pro 账号无限制。配置后 token 将通过账号认证获取，有效降低 429 概率。
