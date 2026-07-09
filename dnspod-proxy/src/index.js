@@ -135,7 +135,37 @@ async function handleRequest(request, env, ctx) {
         return new Response('Method not allowed. Use GET or POST.', { status: 405 });
     }
 
-    // Check for DNS query parameter in GET requests
+    // ── JSON-format DoH: ?name=example.com&type=A (Accept: application/dns-json) ──
+    const wantsJson = (request.headers.get('Accept') || '').includes('application/dns-json');
+    if (isGet && url.searchParams.has('name')) {
+        // Forward to a JSON-capable provider (Cloudflare or Google)
+        const jsonProviders = [
+            'https://cloudflare-dns.com/dns-query',
+            'https://dns.google/resolve',
+        ];
+        const jsonBase = jsonProviders[Math.floor(Math.random() * jsonProviders.length)];
+        const jsonParams = new URLSearchParams();
+        jsonParams.set('name', url.searchParams.get('name'));
+        jsonParams.set('type', url.searchParams.get('type') || 'A');
+        const jsonUrl = jsonBase + '?' + jsonParams.toString();
+        try {
+            const resp = await fetch(jsonUrl, {
+                headers: { 'Accept': 'application/dns-json', 'User-Agent': 'DoH-Proxy-Worker/1.0' }
+            });
+            const resHeaders = new Headers(resp.headers);
+            resHeaders.set('Access-Control-Allow-Origin', '*');
+            resHeaders.set('Content-Type', 'application/dns-json');
+            resHeaders.set('Cache-Control', `public, max-age=${CACHE_TTL}`);
+            return new Response(resp.body, { status: resp.status, headers: resHeaders });
+        } catch(e) {
+            return new Response(JSON.stringify({ error: e.message }), {
+                status: 502,
+                headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+            });
+        }
+    }
+
+    // Check for DNS query parameter in GET requests (binary RFC 8484)
     if (isGet && !url.searchParams.has('dns')) {
         return new Response('Missing DNS query parameter', { status: 400 });
     }
@@ -830,281 +860,549 @@ function serveLandingPage(request) {
     workerUrl.pathname = '/dns-query';
     const dnsEndpoint = workerUrl.toString();
 
-    const html = `
-  <!DOCTYPE html>
-  <html lang="en" data-theme="light">
-  <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Cloudflare DOH Proxy Service</title>
-    <meta name="description" content="A Cloudflare Worker that proxies DNS-over-HTTPS requests with load balancing, failover, and ad-blocking support.">
-    <style>${getSharedStyles()}</style>
-  </head>
-  <body>
+    const html = `<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DoH Proxy Service</title>
+  <meta name="description" content="DNS-over-HTTPS proxy with multi-provider load balancing, auto-failover and ad-blocking.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=DM+Sans:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    ${getSharedStyles()}
 
-    <!-- 顶部工具栏 -->
-    <nav class="toolbar" role="navigation" aria-label="Site controls">
-      <button class="toolbar-btn lang-btn" data-lang="en" onclick="switchLang('en')">EN</button>
-      <button class="toolbar-btn lang-btn" data-lang="zh" onclick="switchLang('zh')">中文</button>
-      <button class="theme-toggle" id="themeToggle" onclick="toggleTheme()" aria-label="Toggle theme">🌙</button>
-    </nav>
+    /* ── Additional styles for DNS query tab ── */
+    .query-panel { display:flex; flex-direction:column; gap:20px; }
 
-    <div class="container">
+    .ep-row {
+      display:flex; align-items:center; gap:12px;
+      background:var(--bg-tertiary);
+      border:1px solid var(--border-color);
+      border-radius:var(--radius-sm);
+      padding:12px 16px;
+    }
+    .ep-url {
+      flex:1; font-family:var(--font-mono);
+      font-size:0.85rem; color:var(--text-secondary);
+      word-break:break-all; line-height:1.5;
+    }
+    .ep-copy-btn {
+      flex-shrink:0;
+      padding:7px 16px;
+      border:1px solid var(--border-color);
+      border-radius:999px;
+      background:transparent;
+      color:var(--text-secondary);
+      font-family:var(--font-body);
+      font-size:0.8rem; font-weight:500;
+      cursor:pointer;
+      transition:all .25s ease;
+    }
+    .ep-copy-btn:hover {
+      border-color:var(--accent-cyan);
+      color:var(--accent-cyan);
+    }
 
-      <!-- Hero -->
-      <header class="hero fade-up">
-        <div class="hero-badge" data-i18n="badge">DNS-OVER-HTTPS PROXY</div>
-        <h1 data-i18n="title">High-Performance DoH Proxy</h1>
-        <p class="subtitle" data-i18n="subtitle">Cloudflare Worker powered DNS proxy with multi-provider load balancing, automatic failover, and built-in ad blocking.</p>
-      </header>
+    .input-row {
+      display:flex; gap:10px; align-items:center; flex-wrap:wrap;
+    }
+    .query-input {
+      flex:1; min-width:180px;
+      padding:11px 16px;
+      border:1px solid var(--border-color);
+      border-radius:var(--radius-sm);
+      background:var(--bg-secondary);
+      color:var(--text-primary);
+      font-family:var(--font-body);
+      font-size:0.9rem;
+      outline:none;
+      transition:border-color .25s;
+    }
+    .query-input:focus { border-color:var(--accent-cyan); }
+    .query-input::placeholder { color:var(--text-tertiary); }
 
-      <!-- 端点卡片 -->
-      <div class="endpoint-card fade-up">
-        <h2 data-i18n="endpoint_title">Your DoH Endpoint</h2>
-        <p class="endpoint-desc" data-i18n="endpoint_desc">Use this URL as your DNS-over-HTTPS resolver</p>
-        <div class="endpoint-url" id="endpointUrl">${dnsEndpoint}</div>
-        <button class="copy-btn" onclick="copyEndpoint()" data-i18n="copy_btn">Copy Endpoint URL</button>
-      </div>
+    .type-select {
+      padding:11px 14px;
+      border:1px solid var(--border-color);
+      border-radius:var(--radius-sm);
+      background:var(--bg-secondary);
+      color:var(--text-primary);
+      font-family:var(--font-mono);
+      font-size:0.85rem;
+      cursor:pointer;
+      outline:none;
+      transition:border-color .25s;
+      appearance:none;
+      min-width:90px;
+    }
+    .type-select:focus { border-color:var(--accent-cyan); }
 
-      <!-- 特性 -->
-      <div class="features-grid fade-up">
-        <div class="feature-card">
-          <div class="feature-icon">⚡</div>
-          <h3 data-i18n="feat_fast_t">Lightning Fast</h3>
-          <p data-i18n="feat_fast_d">Leverages Cloudflare's global edge network for minimal latency and maximum performance.</p>
+    .query-btn {
+      padding:11px 26px;
+      border:none;
+      border-radius:var(--radius-sm);
+      background:var(--accent-gradient);
+      color:#fff;
+      font-family:var(--font-body);
+      font-size:0.9rem; font-weight:600;
+      cursor:pointer;
+      transition:all .3s ease;
+      letter-spacing:.01em;
+      white-space:nowrap;
+    }
+    .query-btn:hover { transform:translateY(-2px); box-shadow:0 6px 20px rgba(6,182,212,.3); }
+    .query-btn:active { transform:translateY(0); }
+
+    .results-area {
+      min-height:120px;
+      border:1px solid var(--border-color);
+      border-radius:var(--radius-sm);
+      overflow:hidden;
+    }
+    .results-table { width:100%; border-collapse:collapse; font-size:0.88rem; }
+    .results-table thead { background:var(--bg-tertiary); }
+    .results-table th {
+      padding:10px 16px;
+      text-align:left;
+      font-family:var(--font-heading);
+      font-size:0.78rem; font-weight:600;
+      text-transform:uppercase; letter-spacing:.05em;
+      color:var(--text-tertiary);
+      border-bottom:1px solid var(--border-color);
+    }
+    .results-table td {
+      padding:11px 16px;
+      color:var(--text-secondary);
+      border-bottom:1px solid var(--border-color);
+      font-family:var(--font-mono);
+      font-size:0.82rem;
+      word-break:break-all;
+    }
+    .results-table tr:last-child td { border-bottom:none; }
+    .results-table tr:hover td { background:var(--bg-tertiary); }
+    .results-table td:first-child {
+      color:var(--accent-cyan);
+      font-weight:600;
+    }
+
+    .q-state {
+      display:flex; align-items:center; justify-content:center;
+      min-height:120px;
+      color:var(--text-tertiary);
+      font-size:0.88rem;
+      gap:8px;
+    }
+    .q-spinner {
+      width:18px; height:18px;
+      border:2px solid var(--border-color);
+      border-top-color:var(--accent-cyan);
+      border-radius:50%;
+      animation:spin .7s linear infinite;
+    }
+    @keyframes spin { to { transform:rotate(360deg); } }
+    .q-error { color:#f87171; }
+
+    /* ── Code block with copy button ── */
+    .code-wrap { position:relative; }
+    .code-wrap .code-block { margin:0; }
+    .code-copy-btn {
+      position:absolute; top:10px; right:10px;
+      padding:4px 12px;
+      border:1px solid rgba(255,255,255,.15);
+      border-radius:6px;
+      background:rgba(255,255,255,.08);
+      color:rgba(255,255,255,.7);
+      font-family:var(--font-body);
+      font-size:0.75rem; font-weight:500;
+      cursor:pointer;
+      transition:all .2s;
+    }
+    .code-copy-btn:hover {
+      background:rgba(255,255,255,.15);
+      color:#fff;
+    }
+
+    /* ── Provider cards ── */
+    .prov-grid {
+      display:grid;
+      grid-template-columns:repeat(auto-fill,minmax(240px,1fr));
+      gap:16px; margin-top:20px;
+    }
+    .prov-card {
+      background:var(--bg-tertiary);
+      border:1px solid var(--border-color);
+      border-radius:var(--radius-sm);
+      padding:18px 20px;
+      transition:all .3s ease;
+    }
+    .prov-card:hover { border-color:var(--border-hover); transform:translateY(-2px); box-shadow:var(--card-hover-shadow); }
+    .prov-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; }
+    .prov-name { font-family:var(--font-heading); font-weight:600; font-size:.95rem; color:var(--text-primary); }
+    .prov-weight {
+      padding:3px 10px; border-radius:999px;
+      font-size:.75rem; font-weight:600;
+      background:var(--tag-bg); color:var(--tag-text);
+      font-family:var(--font-mono);
+    }
+    .prov-url { font-family:var(--font-mono); font-size:.78rem; color:var(--text-tertiary); word-break:break-all; }
+
+    /* ── Usage section ── */
+    .usage-section { margin-bottom:28px; }
+    .usage-section h3 {
+      font-family:var(--font-heading); font-size:1rem; font-weight:600;
+      margin-bottom:10px; color:var(--text-primary);
+    }
+    .usage-section p { font-size:.9rem; color:var(--text-secondary); margin-bottom:8px; line-height:1.6; }
+
+    @media(max-width:640px){
+      .input-row { flex-direction:column; }
+      .query-input,.type-select,.query-btn { width:100%; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Toolbar -->
+  <nav class="toolbar" role="navigation">
+    <button class="toolbar-btn lang-btn" data-lang="en" onclick="switchLang('en')">EN</button>
+    <button class="toolbar-btn lang-btn" data-lang="zh" onclick="switchLang('zh')">中文</button>
+    <button class="theme-toggle" id="themeToggle" onclick="toggleTheme()" aria-label="Toggle theme">☀️</button>
+  </nav>
+
+  <div class="container">
+
+    <!-- Hero -->
+    <header class="hero fade-up">
+      <div class="hero-badge" data-i18n="badge">DNS-OVER-HTTPS PROXY</div>
+      <h1 data-i18n="title">High-Performance DoH Proxy</h1>
+      <p class="subtitle" data-i18n="subtitle">Cloudflare Worker powered DNS proxy with multi-provider load balancing, automatic failover, and built-in ad blocking.</p>
+    </header>
+
+    <!-- Tab nav -->
+    <div class="tabs fade-up" role="tablist">
+      <button class="tab-btn active" data-tab="tab-query"  onclick="switchTab('tab-query')"  role="tab" data-i18n="tab_query">🔍 DNS Query</button>
+      <button class="tab-btn"        data-tab="tab-usage"  onclick="switchTab('tab-usage')"  role="tab" data-i18n="tab_usage">📖 Usage</button>
+      <button class="tab-btn"        data-tab="tab-provs"  onclick="switchTab('tab-provs')"  role="tab" data-i18n="tab_provs">🖥️ Providers</button>
+    </div>
+
+    <!-- ═══ Tab 1: DNS Query ═══ -->
+    <div id="tab-query" class="tab-panel active" role="tabpanel">
+      <div class="card fade-up">
+        <h2 data-i18n="query_title">DNS Query</h2>
+        <div class="query-panel">
+
+          <!-- Endpoint display -->
+          <div class="ep-row">
+            <span class="ep-url" id="ep-display">${dnsEndpoint}</span>
+            <button class="ep-copy-btn" onclick="copyEp()" data-i18n="copy_ep">Copy</button>
+          </div>
+
+          <!-- Query row -->
+          <div class="input-row">
+            <input class="query-input" id="q-domain" type="text" autocomplete="off" spellcheck="false"
+              data-i18n-placeholder="q_placeholder" placeholder="example.com"
+              onkeydown="if(event.key==='Enter')doQuery()">
+            <select class="type-select" id="q-type">
+              <option value="A">A</option>
+              <option value="AAAA">AAAA</option>
+              <option value="CNAME">CNAME</option>
+              <option value="MX">MX</option>
+              <option value="TXT">TXT</option>
+              <option value="NS">NS</option>
+              <option value="SOA">SOA</option>
+              <option value="PTR">PTR</option>
+              <option value="SRV">SRV</option>
+              <option value="ANY">ALL</option>
+            </select>
+            <button class="query-btn" onclick="doQuery()" data-i18n="q_btn">Query</button>
+          </div>
+
+          <!-- Results -->
+          <div class="results-area" id="q-results">
+            <div class="q-state" data-i18n="q_hint">Enter a domain name and press Query</div>
+          </div>
+
         </div>
-        <div class="feature-card">
-          <div class="feature-icon">🔄</div>
-          <h3 data-i18n="feat_lb_t">Load Balancing</h3>
-          <p data-i18n="feat_lb_d">Intelligently distributes requests across multiple DNS providers based on configurable weights.</p>
-        </div>
-        <div class="feature-card">
-          <div class="feature-icon">🛡️</div>
-          <h3 data-i18n="feat_fo_t">Auto Failover</h3>
-          <p data-i18n="feat_fo_d">Seamlessly switches to backup providers when primary ones experience issues.</p>
-        </div>
       </div>
+    </div>
 
-      <!-- Tab 切页 -->
-      <div class="tabs fade-up" role="tablist">
-        <button class="tab-btn active" data-tab="tab-usage" onclick="switchTab('tab-usage')" role="tab" data-i18n="tab_usage">Usage Examples</button>
-        <button class="tab-btn" data-tab="tab-info" onclick="switchTab('tab-info')" role="tab" data-i18n="tab_info">Providers & Config</button>
-      </div>
+    <!-- ═══ Tab 2: Usage ═══ -->
+    <div id="tab-usage" class="tab-panel" role="tabpanel">
+      <div class="card fade-up">
+        <h2 data-i18n="usage_title">Usage Guide</h2>
 
-      <!-- Tab 1: 使用示例 -->
-      <div id="tab-usage" class="tab-panel active" role="tabpanel">
-        <div class="card fade-up">
-          <h2 data-i18n="usage_title">Usage Examples</h2>
-          <p data-i18n="usage_desc">Use this worker as a DoH endpoint:</p>
-
-          <h3 data-i18n="usage_get_t">GET Requests</h3>
-          <p data-i18n-html="usage_get_d">For GET requests, the DNS query must be base64url-encoded as per the <a href="https://tools.ietf.org/html/rfc8484">RFC 8484 specification</a>:</p>
-          <div class="code-block">GET /dns-query?dns=&lt;base64url-encoded-dns-query&gt;</div>
-
-          <p><strong data-i18n="usage_why_b64">Why base64url encoding?</strong></p>
-          <ul data-i18n-html="usage_b64_reasons">
-            <li>DNS queries are binary data that cannot be safely transmitted in URLs</li>
-            <li>Base64url encoding converts binary data into a URL-safe string format</li>
-            <li>Standard base64 uses '+' and '/' which have special meaning in URLs</li>
-            <li>Base64url replaces these with '-' and '_' making it URL-safe</li>
-          </ul>
-          <p><a href="/dns-encoding" class="btn-inline" data-i18n="usage_enc_link">DNS Encoding Details →</a></p>
-
-          <h3 data-i18n="usage_curl_t">Example with curl</h3>
-          <div class="code-block">curl "${dnsEndpoint}?dns=q80BAAABAAAAAAAAA3d3dwdleGFtcGxlA2NvbQAAAQAB"</div>
-
-          <h3 data-i18n="usage_post_t">POST Requests</h3>
-          <p data-i18n-html="usage_post_d">For POST requests, the DNS query is sent as binary data in the request body:</p>
-          <div class="code-block">POST /dns-query
-Content-Type: application/dns-message
-&lt;binary-dns-query&gt;</div>
-          <div class="code-block">curl -H "Content-Type: application/dns-message" \\
-     --data-binary @query.dns \\
-     ${dnsEndpoint}</div>
-
-          <h3 data-i18n="usage_nob64_t">Using Without Base64 Encoding</h3>
-          <p data-i18n-html="usage_nob64_d">To avoid base64 encoding entirely, use POST requests with the <code>Content-Type: application/dns-message</code> header.</p>
-
-          <h3 data-i18n="usage_dig_t">Using with dig</h3>
-          <div class="code-block">dig @\${new URL(dnsEndpoint).hostname} example.com</div>
-        </div>
-      </div>
-
-      <!-- Tab 2: 提供商 & 配置 -->
-      <div id="tab-info" class="tab-panel" role="tabpanel">
-        <div class="card fade-up">
-          <h2 data-i18n="prov_title">Supported DNS Providers</h2>
-          <p data-i18n="prov_desc">This proxy supports both general DNS providers and ad-blocking focused providers for enhanced privacy and security.</p>
-          <div class="providers-grid">
-            <div class="provider-item">
-              <div class="provider-head"><span class="provider-name">Cloudflare</span><span class="provider-weight">20%</span></div>
-              <div class="provider-url">https://cloudflare-dns.com/dns-query</div>
-            </div>
-            <div class="provider-item">
-              <div class="provider-head"><span class="provider-name">Google</span><span class="provider-weight">15%</span></div>
-              <div class="provider-url">https://dns.google/dns-query</div>
-            </div>
-            <div class="provider-item">
-              <div class="provider-head"><span class="provider-name">Quad9</span><span class="provider-weight">15%</span></div>
-              <div class="provider-url">https://dns.quad9.net/dns-query</div>
-            </div>
-            <div class="provider-item">
-              <div class="provider-head"><span class="provider-name">OpenDNS</span><span class="provider-weight">10%</span></div>
-              <div class="provider-url">https://doh.opendns.com/dns-query</div>
-            </div>
-            <div class="provider-item">
-              <div class="provider-head"><span class="provider-name">AdGuard</span><span class="provider-weight">10%</span></div>
-              <div class="provider-url">https://dns.adguard.com/dns-query</div>
-              <div class="provider-desc" data-i18n="adguard_d">Blocks ads, trackers, and malicious domains</div>
-            </div>
-            <div class="provider-item">
-              <div class="provider-head"><span class="provider-name">ControlD</span><span class="provider-weight">10%</span></div>
-              <div class="provider-url">https://freedns.controld.com/p2</div>
-              <div class="provider-desc" data-i18n="controld_d">Blocks ads and tracking domains</div>
-            </div>
-            <div class="provider-item">
-              <div class="provider-head"><span class="provider-name">Mullvad</span><span class="provider-weight">10%</span></div>
-              <div class="provider-url">https://adblock.dns.mullvad.net/dns-query</div>
-              <div class="provider-desc" data-i18n="mullvad_d">Blocks ads and trackers</div>
-            </div>
-            <div class="provider-item">
-              <div class="provider-head"><span class="provider-name">NextDNS</span><span class="provider-weight">10%</span></div>
-              <div class="provider-url">https://dns.nextdns.io/dns-query</div>
-              <div class="provider-desc" data-i18n="nextdns_d">Blocks ads, trackers, and malicious domains</div>
-            </div>
+        <!-- Endpoint -->
+        <div class="usage-section">
+          <h3 data-i18n="usage_ep_t">Your DoH Endpoint</h3>
+          <div class="ep-row" style="margin-bottom:0">
+            <span class="ep-url">${dnsEndpoint}</span>
+            <button class="ep-copy-btn" onclick="copyEp()" data-i18n="copy_ep">Copy</button>
           </div>
         </div>
 
-        <div class="card fade-up">
-          <h2 data-i18n="cfg_title">Configuration</h2>
-          <p data-i18n="cfg_desc">This worker automatically balances requests across multiple DNS providers based on the configured weights. All DNS responses are cached for 5 minutes to improve performance.</p>
-          <p data-i18n="cfg_cors">For CORS support, the worker includes the following headers in all responses:</p>
-          <div class="code-block">Access-Control-Allow-Origin: *
-Access-Control-Allow-Methods: GET, POST, OPTIONS
-Access-Control-Allow-Headers: Content-Type, Accept</div>
+        <!-- GET -->
+        <div class="usage-section">
+          <h3 data-i18n="usage_get_t">GET Request (JSON)</h3>
+          <p data-i18n="usage_get_d">Fetch DNS records in JSON format:</p>
+          <div class="code-wrap">
+            <div class="code-block" id="code-get">GET ${dnsEndpoint}?name=example.com&amp;type=A
+Accept: application/dns-json</div>
+            <button class="code-copy-btn" onclick="copyCode('code-get')" data-i18n="copy_code">Copy</button>
+          </div>
         </div>
-      </div>
 
-      <footer class="fade-up">
-        <p data-i18n="footer">DoH Proxy — Powered by <span>Cloudflare Workers</span></p>
-      </footer>
+        <!-- POST -->
+        <div class="usage-section">
+          <h3 data-i18n="usage_post_t">POST Request (RFC 8484)</h3>
+          <p data-i18n="usage_post_d">Send a binary DNS query in the request body:</p>
+          <div class="code-wrap">
+            <div class="code-block" id="code-post">POST ${dnsEndpoint}
+Content-Type: application/dns-message
+
+&lt;binary DNS wire-format query&gt;</div>
+            <button class="code-copy-btn" onclick="copyCode('code-post')" data-i18n="copy_code">Copy</button>
+          </div>
+        </div>
+
+        <!-- curl -->
+        <div class="usage-section">
+          <h3 data-i18n="usage_curl_t">curl Example</h3>
+          <div class="code-wrap">
+            <div class="code-block" id="code-curl">curl "${dnsEndpoint}?name=example.com&type=A" \\
+  -H "Accept: application/dns-json"</div>
+            <button class="code-copy-btn" onclick="copyCode('code-curl')" data-i18n="copy_code">Copy</button>
+          </div>
+        </div>
+
+        <!-- dig -->
+        <div class="usage-section">
+          <h3 data-i18n="usage_dig_t">dig Example</h3>
+          <div class="code-wrap">
+            <div class="code-block" id="code-dig">dig @${new URL(dnsEndpoint).hostname} example.com A</div>
+            <button class="code-copy-btn" onclick="copyCode('code-dig')" data-i18n="copy_code">Copy</button>
+          </div>
+        </div>
+
+        <p><a href="/dns-encoding" class="btn-inline" data-i18n="enc_link">DNS Encoding Details →</a></p>
+      </div>
     </div>
 
-    <div class="toast" id="toast"></div>
+    <!-- ═══ Tab 3: Providers ═══ -->
+    <div id="tab-provs" class="tab-panel" role="tabpanel">
+      <div class="card fade-up">
+        <h2 data-i18n="prov_title">DNS Providers</h2>
+        <p data-i18n="prov_desc">Requests are distributed across these providers via weighted random selection with automatic failover.</p>
+        <div class="prov-grid" id="prov-grid"></div>
+      </div>
+    </div>
 
-    <script>
-      ${getSharedScript()}
+    <footer class="fade-up">
+      <p data-i18n="footer">DoH Proxy — Powered by <span>Cloudflare Workers</span></p>
+    </footer>
+  </div>
 
-      i18nData = {
-        en: {
-          page_title: "Cloudflare DOH Proxy Service",
-          badge: "DNS-OVER-HTTPS PROXY",
-          title: "High-Performance DoH Proxy",
-          subtitle: "Cloudflare Worker powered DNS proxy with multi-provider load balancing, automatic failover, and built-in ad blocking.",
-          endpoint_title: "Your DoH Endpoint",
-          endpoint_desc: "Use this URL as your DNS-over-HTTPS resolver",
-          copy_btn: "Copy Endpoint URL",
-          feat_fast_t: "Lightning Fast",
-          feat_fast_d: "Leverages Cloudflare's global edge network for minimal latency and maximum performance.",
-          feat_lb_t: "Load Balancing",
-          feat_lb_d: "Intelligently distributes requests across multiple DNS providers based on configurable weights.",
-          feat_fo_t: "Auto Failover",
-          feat_fo_d: "Seamlessly switches to backup providers when primary ones experience issues.",
-          tab_usage: "Usage Examples",
-          tab_info: "Providers & Config",
-          usage_title: "Usage Examples",
-          usage_desc: "Use this worker as a DoH endpoint:",
-          usage_get_t: "GET Requests",
-          usage_get_d: 'For GET requests, the DNS query must be base64url-encoded as per the <a href="https://tools.ietf.org/html/rfc8484">RFC 8484 specification</a>:',
-          usage_why_b64: "Why base64url encoding?",
-          usage_b64_reasons: "<li>DNS queries are binary data that cannot be safely transmitted in URLs</li><li>Base64url encoding converts binary data into a URL-safe string format</li><li>Standard base64 uses '+' and '/' which have special meaning in URLs</li><li>Base64url replaces these with '-' and '_' making it URL-safe</li>",
-          usage_enc_link: "DNS Encoding Details →",
-          usage_curl_t: "Example with curl",
-          usage_post_t: "POST Requests",
-          usage_post_d: "For POST requests, the DNS query is sent as binary data in the request body:",
-          usage_nob64_t: "Using Without Base64 Encoding",
-          usage_nob64_d: 'To avoid base64 encoding entirely, use POST requests with the <code>Content-Type: application/dns-message</code> header.',
-          usage_dig_t: "Using with dig",
-          prov_title: "Supported DNS Providers",
-          prov_desc: "This proxy supports both general DNS providers and ad-blocking focused providers for enhanced privacy and security.",
-          adguard_d: "Blocks ads, trackers, and malicious domains",
-          controld_d: "Blocks ads and tracking domains",
-          mullvad_d: "Blocks ads and trackers",
-          nextdns_d: "Blocks ads, trackers, and malicious domains",
-          cfg_title: "Configuration",
-          cfg_desc: "This worker automatically balances requests across multiple DNS providers based on the configured weights. All DNS responses are cached for 5 minutes to improve performance.",
-          cfg_cors: "For CORS support, the worker includes the following headers in all responses:",
-          footer: "DoH Proxy — Powered by Cloudflare Workers",
-          copy_ok: "Endpoint URL copied!",
-          copy_fail: "Copy failed. Please copy manually."
-        },
-        zh: {
-          page_title: "Public DOH 代理服务",
-          badge: "DNS-OVER-HTTPS 代理",
-          title: "高性能 DoH 代理",
-          subtitle: "基于 Cloudflare Worker 的 DNS 代理服务，支持多提供商负载均衡、自动故障转移和内置广告拦截。",
-          endpoint_title: "您的 DoH 端点",
-          endpoint_desc: "将此 URL 用作您的 DNS-over-HTTPS 解析器",
-          copy_btn: "复制端点 URL",
-          feat_fast_t: "极速响应",
-          feat_fast_d: "利用 Cloudflare 全球边缘网络，实现最低延迟和最佳性能。",
-          feat_lb_t: "负载均衡",
-          feat_lb_d: "根据可配置的权重，智能地将请求分发到多个 DNS 提供商。",
-          feat_fo_t: "自动故障转移",
-          feat_fo_d: "当主要提供商出现问题时，无缝切换到备用提供商。",
-          tab_usage: "使用示例",
-          tab_info: "提供商 & 配置",
-          usage_title: "使用示例",
-          usage_desc: "将此 Worker 用作 DoH 端点：",
-          usage_get_t: "GET 请求",
-          usage_get_d: 'GET 请求中，DNS 查询必须按照 <a href="https://tools.ietf.org/html/rfc8484">RFC 8484 规范</a> 进行 base64url 编码：',
-          usage_why_b64: "为什么需要 base64url 编码？",
-          usage_b64_reasons: "<li>DNS 查询是二进制数据，无法安全地在 URL 中传输</li><li>Base64url 编码将二进制数据转换为 URL 安全的字符串格式</li><li>标准 base64 使用的 '+' 和 '/' 字符在 URL 中有特殊含义</li><li>Base64url 用 '-' 和 '_' 替换这些字符，使其对 URL 安全</li>",
-          usage_enc_link: "DNS 编码详细说明 →",
-          usage_curl_t: "curl 示例",
-          usage_post_t: "POST 请求",
-          usage_post_d: "POST 请求中，DNS 查询以二进制数据形式在请求体中发送：",
-          usage_nob64_t: "无需 Base64 编码的方式",
-          usage_nob64_d: '如果不想使用 base64 编码，可以使用 POST 请求并设置 <code>Content-Type: application/dns-message</code> 请求头。',
-          usage_dig_t: "使用 dig 命令",
-          prov_title: "支持的 DNS 提供商",
-          prov_desc: "此代理支持通用 DNS 提供商和专注于广告拦截的提供商，以增强隐私和安全性。",
-          adguard_d: "拦截广告、追踪器和恶意域名",
-          controld_d: "拦截广告和追踪域名",
-          mullvad_d: "拦截广告和追踪器",
-          nextdns_d: "拦截广告、追踪器和恶意域名",
-          cfg_title: "配置说明",
-          cfg_desc: "此 Worker 根据配置的权重自动在多个 DNS 提供商之间进行负载均衡。所有 DNS 响应缓存 5 分钟以提升性能。",
-          cfg_cors: "为支持 CORS，Worker 在所有响应中包含以下请求头：",
-          footer: "DoH 代理 — 由 Cloudflare Workers 驱动",
-          copy_ok: "端点 URL 已复制！",
-          copy_fail: "复制失败，请手动复制。"
-        }
-      };
+  <div class="toast" id="toast"></div>
 
-      function copyEndpoint() {
-        var url = _d.getElementById('endpointUrl')[_tc];
-        _n[_cb][_wt](url).then(function() {
-          showToast(i18nData[currentLang].copy_ok);
-        }).catch(function() {
-          showToast(i18nData[currentLang].copy_fail);
-        });
+  <script>
+    ${getSharedScript()}
+
+    /* ── i18n ── */
+    i18nData = {
+      en: {
+        page_title: "DoH Proxy Service",
+        badge: "DNS-OVER-HTTPS PROXY",
+        title: "High-Performance DoH Proxy",
+        subtitle: "Cloudflare Worker powered DNS proxy with multi-provider load balancing, automatic failover, and built-in ad blocking.",
+        tab_query: "🔍 DNS Query",
+        tab_usage: "📖 Usage",
+        tab_provs: "🖥️ Providers",
+        query_title: "DNS Query",
+        copy_ep: "Copy",
+        q_placeholder: "example.com",
+        q_btn: "Query",
+        q_hint: "Enter a domain name and press Query",
+        q_loading: "Querying...",
+        q_no_domain: "Please enter a domain name",
+        q_error: "Query failed: ",
+        q_no_results: "No records found for this query.",
+        col_type: "Type",
+        col_name: "Name",
+        col_ttl: "TTL",
+        col_value: "Value",
+        copy_ep_ok: "Endpoint URL copied!",
+        copy_code_ok: "Copied!",
+        copy_fail: "Copy failed — please copy manually.",
+        usage_title: "Usage Guide",
+        usage_ep_t: "Your DoH Endpoint",
+        usage_get_t: "GET Request (JSON)",
+        usage_get_d: "Fetch DNS records in JSON format:",
+        usage_post_t: "POST Request (RFC 8484)",
+        usage_post_d: "Send a binary DNS query in the request body:",
+        usage_curl_t: "curl Example",
+        usage_dig_t: "dig Example",
+        enc_link: "DNS Encoding Details →",
+        copy_code: "Copy",
+        prov_title: "DNS Providers",
+        prov_desc: "Requests are distributed across these providers via weighted random selection with automatic failover.",
+        footer: "DoH Proxy — Powered by Cloudflare Workers"
+      },
+      zh: {
+        page_title: "DoH 代理服务",
+        badge: "DNS-OVER-HTTPS 代理",
+        title: "高性能 DoH 代理",
+        subtitle: "基于 Cloudflare Worker 的 DNS 代理，支持多提供商负载均衡、自动故障转移及内置广告拦截。",
+        tab_query: "🔍 DNS 查询",
+        tab_usage: "📖 使用说明",
+        tab_provs: "🖥️ 提供商",
+        query_title: "DNS 查询",
+        copy_ep: "复制",
+        q_placeholder: "example.com",
+        q_btn: "查询",
+        q_hint: "输入域名后点击查询",
+        q_loading: "查询中...",
+        q_no_domain: "请输入域名",
+        q_error: "查询失败：",
+        q_no_results: "未找到该查询的记录。",
+        col_type: "类型",
+        col_name: "名称",
+        col_ttl: "TTL",
+        col_value: "值",
+        copy_ep_ok: "端点 URL 已复制！",
+        copy_code_ok: "已复制！",
+        copy_fail: "复制失败，请手动复制。",
+        usage_title: "使用说明",
+        usage_ep_t: "您的 DoH 端点",
+        usage_get_t: "GET 请求（JSON 格式）",
+        usage_get_d: "以 JSON 格式获取 DNS 记录：",
+        usage_post_t: "POST 请求（RFC 8484）",
+        usage_post_d: "在请求体中发送二进制 DNS 查询：",
+        usage_curl_t: "curl 示例",
+        usage_dig_t: "dig 示例",
+        enc_link: "DNS 编码详细说明 →",
+        copy_code: "复制",
+        prov_title: "DNS 提供商",
+        prov_desc: "请求通过加权随机选择分配到以下提供商，并支持自动故障转移。",
+        footer: "DoH 代理 — 由 Cloudflare Workers 驱动"
       }
+    };
 
-      initThemeAndLang();
-    </script>
-  </body>
-  </html>`;
+    /* ── Placeholder i18n ── */
+    function applyPlaceholders() {
+      var t = i18nData[currentLang];
+      document.querySelectorAll('[data-i18n-placeholder]').forEach(function(el) {
+        var k = el.getAttribute('data-i18n-placeholder');
+        if (t[k]) el.placeholder = t[k];
+      });
+    }
+    // Override applyLang using assignment (not function declaration) to avoid hoisting/recursion
+    var _origApplyLang = applyLang;
+    applyLang = function() {
+      _origApplyLang();
+      applyPlaceholders();
+    };
+
+    /* ── DNS type map ── */
+    var DNS_TYPE_MAP = {1:'A',2:'NS',5:'CNAME',6:'SOA',12:'PTR',15:'MX',16:'TXT',28:'AAAA',33:'SRV'};
+
+    /* ── HTML escaping ── */
+    function escHtml(s) {
+      return String(s)
+        .replace(/&/g,'&amp;')
+        .replace(/</g,'&lt;')
+        .replace(/>/g,'&gt;')
+        .replace(/"/g,'&quot;');
+    }
+
+    /* ── DNS Query ── */
+    async function doQuery() {
+      var domain = document.getElementById('q-domain').value.trim();
+      var type   = document.getElementById('q-type').value;
+      var t      = i18nData[currentLang];
+      if (!domain) { showToast(t.q_no_domain); return; }
+
+      var ra = document.getElementById('q-results');
+      ra.innerHTML = '<div class="q-state"><div class="q-spinner"></div>' + escHtml(t.q_loading) + '</div>';
+
+      try {
+        var url  = '/dns-query?name=' + encodeURIComponent(domain) + '&type=' + encodeURIComponent(type);
+        var resp = await fetch(url, { headers: { 'Accept': 'application/dns-json' } });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        var data = await resp.json();
+        renderResults(ra, data, t);
+      } catch(e) {
+        ra.innerHTML = '<div class="q-state q-error">' + escHtml(t.q_error) + escHtml(e.message) + '</div>';
+      }
+    }
+
+    function renderResults(ra, data, t) {
+      var answers = data.Answer || data.answer || [];
+      if (!answers.length) {
+        ra.innerHTML = '<div class="q-state">' + escHtml(t.q_no_results) + '</div>';
+        return;
+      }
+      var rows = answers.map(function(r) {
+        var tn = DNS_TYPE_MAP[r.type] || ('TYPE' + r.type);
+        return '<tr><td>' + escHtml(tn) + '</td><td>' + escHtml(r.name) + '</td><td>' + escHtml(String(r.TTL)) + 's</td><td>' + escHtml(String(r.data)) + '</td></tr>';
+      }).join('');
+      ra.innerHTML =
+        '<table class="results-table">' +
+        '<thead><tr><th>' + escHtml(t.col_type) + '</th><th>' + escHtml(t.col_name) + '</th><th>' + escHtml(t.col_ttl) + '</th><th>' + escHtml(t.col_value) + '</th></tr></thead>' +
+        '<tbody>' + rows + '</tbody>' +
+        '</table>';
+    }
+
+    /* ── Copy helpers ── */
+    function copyEp() {
+      var url = document.getElementById('ep-display').textContent;
+      navigator.clipboard.writeText(url).then(function() {
+        showToast(i18nData[currentLang].copy_ep_ok);
+      }).catch(function() {
+        showToast(i18nData[currentLang].copy_fail);
+      });
+    }
+
+    function copyCode(id) {
+      var el = document.getElementById(id);
+      if (!el) return;
+      var text = el.innerText || el.textContent;
+      navigator.clipboard.writeText(text).then(function() {
+        showToast(i18nData[currentLang].copy_code_ok);
+      }).catch(function() {
+        showToast(i18nData[currentLang].copy_fail);
+      });
+    }
+
+    /* ── Render providers ── */
+    (function() {
+      var providers = ${JSON.stringify(DOH_PROVIDERS)};
+      var totalWeight = providers.reduce(function(s, p) { return s + (p.weight || 0); }, 0);
+      var grid = document.getElementById('prov-grid');
+      if (!grid) return;
+      grid.innerHTML = providers.map(function(p) {
+        var pct = totalWeight > 0 ? Math.round((p.weight / totalWeight) * 100) : 0;
+        return '<div class="prov-card">' +
+          '<div class="prov-head"><span class="prov-name">' + escHtml(p.name) + '</span>' +
+          '<span class="prov-weight">' + pct + '%</span></div>' +
+          '<div class="prov-url">' + escHtml(p.url) + '</div>' +
+          '</div>';
+      }).join('');
+    })();
+
+    initThemeAndLang();
+  </script>
+</body>
+</html>`;
 
     return new Response(html, {
+        status: 200,
         headers: {
-            'Content-Type': 'text/html; charset=utf-8',
+            'Content-Type': 'text/html; charset=UTF-8',
             'Cache-Control': 'public, max-age=3600'
         }
     });
 }
-
-// Serve detailed DNS encoding explanation
 function serveDNSEncodingExplanation() {
     const html = `
   <!DOCTYPE html>
