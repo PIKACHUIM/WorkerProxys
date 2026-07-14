@@ -9,45 +9,53 @@ const DOH_PROVIDERS = [
     // General DNS providers
     {
         name: "Cloudflare",
+        slug: "cloudflare",
         url: "https://cloudflare-dns.com/dns-query",
         weight: 20
     },
     {
         name: "Google",
+        slug: "google",
         url: "https://dns.google/dns-query",
         weight: 15
     },
     {
         name: "Quad9",
+        slug: "quad9",
         url: "https://dns.quad9.net/dns-query",
         weight: 15
     },
     {
         name: "OpenDNS",
+        slug: "opendns",
         url: "https://doh.opendns.com/dns-query",
         weight: 10
     },
     // Ad-blocking focused providers
     {
         name: "AdGuard",
+        slug: "adguard",
         url: "https://dns.adguard.com/dns-query",
         weight: 10
         // Blocks ads, trackers, and malicious domains
     },
     {
         name: "ControlD",
+        slug: "controld",
         url: "https://freedns.controld.com/p2",
         weight: 10
         // Blocks ads and tracking domains
     },
     {
         name: "Mullvad",
+        slug: "mullvad",
         url: "https://adblock.dns.mullvad.net/dns-query",
         weight: 10
         // Blocks ads and trackers
     },
     {
         name: "NextDNS",
+        slug: "nextdns",
         url: "https://dns.nextdns.io/dns-query",
         weight: 10
         // Blocks ads, trackers, and malicious domains
@@ -55,11 +63,15 @@ const DOH_PROVIDERS = [
     // 国内 DNS 提供商
     {
         name: "DNSPod",
+        slug: "dnspod",
         url: "https://doh.pub/dns-query",
         weight: 10
         // 腾讯云 DNSPod 公共 DNS，国内访问速度快
     }
 ];
+
+// DNS type codes for binary query building
+const DNS_TYPE_CODES = { A: 1, NS: 2, CNAME: 5, SOA: 6, PTR: 12, MX: 15, TXT: 16, AAAA: 28, SRV: 33, ANY: 255 };
 
 // Cache TTL in seconds (5 minutes)
 const CACHE_TTL = 300;
@@ -122,9 +134,26 @@ async function handleRequest(request, env, ctx) {
         return handleCORS();
     }
 
-    // Validate DNS request
-    if (url.pathname !== '/dns-query') {
-        return new Response('Invalid endpoint. Use /dns-query', { status: 400 });
+    // Match /dns-query or /:slug/dns-query
+    const pathMatch = url.pathname.match(/^\/([a-zA-Z0-9_-]+)\/dns-query$/);
+    const isMainQuery = url.pathname === '/dns-query';
+    if (!isMainQuery && !pathMatch) {
+        return new Response('Invalid endpoint. Use /dns-query or /{provider}/dns-query', { status: 400 });
+    }
+
+    // Extract provider from path or ?provider= query param (query param takes precedence)
+    let targetProvider = null;
+    const queryProvider = url.searchParams.get('provider');
+    if (queryProvider) {
+        targetProvider = findProviderBySlug(queryProvider);
+        if (!targetProvider) {
+            return new Response('Unknown provider: ' + queryProvider, { status: 400 });
+        }
+    } else if (pathMatch) {
+        targetProvider = findProviderBySlug(pathMatch[1]);
+        if (!targetProvider) {
+            return new Response('Unknown provider: ' + pathMatch[1], { status: 400 });
+        }
     }
 
     // Check if it's a DNS query (either via query parameter or POST body)
@@ -136,17 +165,64 @@ async function handleRequest(request, env, ctx) {
     }
 
     // ── JSON-format DoH: ?name=example.com&type=A (Accept: application/dns-json) ──
+    // Cloudflare & Google support native JSON API; others need binary DNS → JSON conversion
+    const JSON_CAPABLE = {
+        cloudflare: 'https://cloudflare-dns.com/dns-query',
+        google: 'https://dns.google/resolve',
+    };
     const wantsJson = (request.headers.get('Accept') || '').includes('application/dns-json');
     if (isGet && url.searchParams.has('name')) {
-        // Forward to a JSON-capable provider (Cloudflare or Google)
-        const jsonProviders = [
-            'https://cloudflare-dns.com/dns-query',
-            'https://dns.google/resolve',
-        ];
-        const jsonBase = jsonProviders[Math.floor(Math.random() * jsonProviders.length)];
+        const domain = url.searchParams.get('name');
+        const type = url.searchParams.get('type') || 'A';
+
+        // If a non-JSON-capable provider is selected, build binary DNS query and parse response
+        if (targetProvider && !JSON_CAPABLE[targetProvider.slug]) {
+            try {
+                const dnsQuery = buildDnsQuery(domain, type);
+                const resp = await fetch(targetProvider.url, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/dns-message',
+                        'Accept': 'application/dns-message',
+                        'User-Agent': 'DoH-Proxy-Worker/1.0'
+                    },
+                    body: dnsQuery
+                });
+                if (!resp.ok) {
+                    return new Response(JSON.stringify({ error: 'Upstream returned HTTP ' + resp.status }), {
+                        status: resp.status,
+                        headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+                    });
+                }
+                const buf = await resp.arrayBuffer();
+                const parsed = parseDnsResponse(buf);
+                return new Response(JSON.stringify(parsed), {
+                    status: 200,
+                    headers: {
+                        'Content-Type': 'application/dns-json',
+                        'Cache-Control': `public, max-age=${CACHE_TTL}`,
+                        'Access-Control-Allow-Origin': '*'
+                    }
+                });
+            } catch(e) {
+                return new Response(JSON.stringify({ error: e.message }), {
+                    status: 502,
+                    headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+                });
+            }
+        }
+
+        // Use native JSON API for Cloudflare / Google or Auto mode
+        let jsonBase;
+        if (targetProvider) {
+            jsonBase = JSON_CAPABLE[targetProvider.slug];
+        } else {
+            const fallbacks = Object.values(JSON_CAPABLE);
+            jsonBase = fallbacks[Math.floor(Math.random() * fallbacks.length)];
+        }
         const jsonParams = new URLSearchParams();
-        jsonParams.set('name', url.searchParams.get('name'));
-        jsonParams.set('type', url.searchParams.get('type') || 'A');
+        jsonParams.set('name', domain);
+        jsonParams.set('type', type);
         const jsonUrl = jsonBase + '?' + jsonParams.toString();
         try {
             const resp = await fetch(jsonUrl, {
@@ -170,8 +246,8 @@ async function handleRequest(request, env, ctx) {
         return new Response('Missing DNS query parameter', { status: 400 });
     }
 
-    // Select the best DoH provider based on weighted random selection
-    const selectedProvider = selectProvider(DOH_PROVIDERS);
+    // Select the best DoH provider based on weighted random selection (or use specified one)
+    const selectedProvider = targetProvider || selectProvider(DOH_PROVIDERS);
 
     try {
         // Create target URL with query parameters
@@ -554,7 +630,7 @@ function getSharedStyles() {
       .tabs {
         display: flex;
         gap: 4px;
-        margin-bottom: 28px;
+        margin: 0 auto 28px;
         background: var(--bg-tertiary);
         border-radius: 999px;
         padding: 4px;
@@ -587,8 +663,10 @@ function getSharedStyles() {
 
       /* ===== 通用卡片 ===== */
       .card {
-        background: var(--bg-secondary);
-        border: 1px solid var(--border-color);
+        background: var(--glass-bg);
+        backdrop-filter: blur(16px);
+        -webkit-backdrop-filter: blur(16px);
+        border: 1px solid var(--glass-border);
         border-radius: var(--radius);
         padding: 32px;
         margin-bottom: 24px;
@@ -750,6 +828,17 @@ function getSharedStyles() {
         background-clip: text;
         font-weight: 600;
       }
+      .footer-github {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        margin-top: 12px;
+        color: var(--text-tertiary);
+        font-size: 0.82rem;
+        text-decoration: none;
+        transition: color 0.25s ease;
+      }
+      .footer-github:hover { color: var(--text-secondary); }
 
       /* ===== 响应式 ===== */
       @media (max-width: 640px) {
@@ -760,6 +849,10 @@ function getSharedStyles() {
         .card { padding: 22px 18px; }
         .tabs { width: 100%; }
         .tab-btn { flex: 1; text-align: center; padding: 9px 12px; font-size: 0.82rem; }
+        .hero-ep { flex-wrap:wrap; gap:8px; padding:0; }
+        .hero-ep-icon { width:38px; height:38px; border-radius:10px; font-size:.95rem; }
+        .hero-ep-url { padding:10px 12px; font-size:.78rem; width:100%; order:1; }
+        .hero-ep-btn { margin:0 4px 8px; width:calc(100% - 8px); justify-content:center; order:2; }
       }
     `;
 }
@@ -905,6 +998,66 @@ function serveLandingPage(request) {
       color:var(--accent-cyan);
     }
 
+    /* ── Hero 端点卡片（美化版）── */
+    .hero-ep {
+      display:inline-flex; align-items:center; gap:0;
+      margin-top:28px;
+      background:var(--glass-bg);
+      border:1px solid var(--glass-border);
+      border-radius:16px;
+      backdrop-filter:blur(16px);
+      -webkit-backdrop-filter:blur(16px);
+      box-shadow:var(--glass-shadow);
+      max-width:560px;
+      overflow:hidden;
+      transition:all .35s ease;
+    }
+    .hero-ep:hover {
+      border-color:rgba(34,211,238,.2);
+      box-shadow:0 8px 40px rgba(34,211,238,.08), var(--glass-shadow);
+    }
+    .hero-ep-icon {
+      flex-shrink:0;
+      width:44px; height:44px;
+      display:flex; align-items:center; justify-content:center;
+      background:var(--accent-gradient);
+      color:#fff;
+      font-size:1.1rem;
+      margin:4px;
+      border-radius:12px;
+    }
+    .hero-ep-url {
+      flex:1;
+      padding:14px 16px;
+      font-family:var(--font-mono);
+      font-size:.85rem;
+      color:var(--text-secondary);
+      word-break:break-all;
+      line-height:1.5;
+      min-width:0;
+    }
+    .hero-ep-btn {
+      flex-shrink:0;
+      display:flex; align-items:center; gap:6px;
+      margin:4px 4px 4px 0;
+      padding:10px 20px;
+      border:none;
+      border-radius:12px;
+      background:var(--accent-gradient);
+      color:#fff;
+      font-family:var(--font-body);
+      font-size:.84rem; font-weight:600;
+      cursor:pointer;
+      transition:all .3s ease;
+      letter-spacing:.01em;
+      white-space:nowrap;
+    }
+    .hero-ep-btn:hover {
+      transform:translateY(-1px);
+      box-shadow:0 6px 20px rgba(34,211,238,.35);
+    }
+    .hero-ep-btn:active { transform:translateY(0); }
+
     .input-row {
       display:flex; gap:10px; align-items:center; flex-wrap:wrap;
     }
@@ -1027,7 +1180,7 @@ function serveLandingPage(request) {
     /* ── Provider cards ── */
     .prov-grid {
       display:grid;
-      grid-template-columns:repeat(auto-fill,minmax(240px,1fr));
+      grid-template-columns:repeat(auto-fill,minmax(280px,1fr));
       gap:16px; margin-top:20px;
     }
     .prov-card {
@@ -1047,6 +1200,29 @@ function serveLandingPage(request) {
       font-family:var(--font-mono);
     }
     .prov-url { font-family:var(--font-mono); font-size:.78rem; color:var(--text-tertiary); word-break:break-all; }
+    .prov-proxy {
+      margin-top:12px; padding-top:12px;
+      border-top:1px solid var(--border-color);
+    }
+    .prov-proxy-label {
+      font-size:.78rem; font-weight:600; color:var(--text-secondary);
+      margin-bottom:4px;
+    }
+    .prov-proxy-url {
+      display:block; font-family:var(--font-mono); font-size:.75rem;
+      color:var(--accent-cyan); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; line-height:1.5;
+      margin-bottom:8px;
+    }
+    .prov-proxy-actions {
+      display:flex; gap:8px; flex-wrap:wrap;
+    }
+    .prov-copy-btn {
+      padding:5px 12px; border:1px solid var(--border-color); border-radius:6px;
+      background:transparent; color:var(--text-secondary);
+      font-family:var(--font-body); font-size:.75rem; font-weight:500;
+      cursor:pointer; transition:all .2s;
+    }
+    .prov-copy-btn:hover { border-color:var(--accent-cyan); color:var(--accent-cyan); }
 
     /* ── Usage section ── */
     .usage-section { margin-bottom:28px; }
@@ -1077,7 +1253,15 @@ function serveLandingPage(request) {
     <header class="hero fade-up">
       <div class="hero-badge" data-i18n="badge">DNS-OVER-HTTPS PROXY</div>
       <h1 data-i18n="title">High-Performance DoH Proxy</h1>
-      <p class="subtitle" data-i18n="subtitle">Cloudflare Worker powered DNS proxy with multi-provider load balancing, automatic failover, and built-in ad blocking.</p>
+      <p class="subtitle" data-i18n-html="subtitle">Cloudflare Worker powered DNS proxy<br>with multi-provider load balancing, automatic failover, and built-in ad blocking.</p>
+      <div class="hero-ep">
+        <div class="hero-ep-icon">🔗</div>
+        <span class="hero-ep-url" id="ep-display">${dnsEndpoint}</span>
+        <button class="hero-ep-btn" onclick="copyEp()">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+          <span data-i18n="copy_ep">Copy</span>
+        </button>
+      </div>
     </header>
 
     <!-- Tab nav -->
@@ -1092,12 +1276,6 @@ function serveLandingPage(request) {
       <div class="card fade-up">
         <h2 data-i18n="query_title">DNS Query</h2>
         <div class="query-panel">
-
-          <!-- Endpoint display -->
-          <div class="ep-row">
-            <span class="ep-url" id="ep-display">${dnsEndpoint}</span>
-            <button class="ep-copy-btn" onclick="copyEp()" data-i18n="copy_ep">Copy</button>
-          </div>
 
           <!-- Query row -->
           <div class="input-row">
@@ -1115,6 +1293,10 @@ function serveLandingPage(request) {
               <option value="PTR">PTR</option>
               <option value="SRV">SRV</option>
               <option value="ANY">ALL</option>
+            </select>
+            <select class="type-select" id="q-provider">
+              <option value="" data-i18n="q_provider_auto">Auto</option>
+              ${DOH_PROVIDERS.map(function(p) { return '<option value="' + p.slug + '">' + p.name + '</option>'; }).join('')}
             </select>
             <button class="query-btn" onclick="doQuery()" data-i18n="q_btn">Query</button>
           </div>
@@ -1200,6 +1382,10 @@ Content-Type: application/dns-message
 
     <footer class="fade-up">
       <p data-i18n="footer">DoH Proxy — Powered by <span>Cloudflare Workers</span></p>
+      <a class="footer-github" href="https://github.com/PIKACHUIM/WorkerProxys" target="_blank" rel="noopener">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        GitHub
+      </a>
     </footer>
   </div>
 
@@ -1214,13 +1400,14 @@ Content-Type: application/dns-message
         page_title: "DoH Proxy Service",
         badge: "DNS-OVER-HTTPS PROXY",
         title: "High-Performance DoH Proxy",
-        subtitle: "Cloudflare Worker powered DNS proxy with multi-provider load balancing, automatic failover, and built-in ad blocking.",
+        subtitle: "Cloudflare Worker powered DNS proxy<br>with multi-provider load balancing, automatic failover, and built-in ad blocking.",
         tab_query: "🔍 DNS Query",
         tab_usage: "📖 Usage",
         tab_provs: "🖥️ Providers",
         query_title: "DNS Query",
         copy_ep: "Copy",
         q_placeholder: "example.com",
+        q_provider_auto: "Auto",
         q_btn: "Query",
         q_hint: "Enter a domain name and press Query",
         q_loading: "Querying...",
@@ -1246,19 +1433,23 @@ Content-Type: application/dns-message
         copy_code: "Copy",
         prov_title: "DNS Providers",
         prov_desc: "Requests are distributed across these providers via weighted random selection with automatic failover.",
+        copy_proxy_label: "Proxy URL:",
+        copy_proxy_url: "Copy Proxy URL",
+        copy_origin_url: "Copy Original URL",
         footer: "DoH Proxy — Powered by Cloudflare Workers"
       },
       zh: {
         page_title: "DoH 代理服务",
         badge: "DNS-OVER-HTTPS 代理",
         title: "高性能 DoH 代理",
-        subtitle: "基于 Cloudflare Worker 的 DNS 代理，支持多提供商负载均衡、自动故障转移及内置广告拦截。",
+        subtitle: "基于 Cloudflare Worker 的 DNS 代理，<br>支持多提供商负载均衡、自动故障转移及内置广告拦截。",
         tab_query: "🔍 DNS 查询",
         tab_usage: "📖 使用说明",
         tab_provs: "🖥️ 提供商",
         query_title: "DNS 查询",
         copy_ep: "复制",
         q_placeholder: "example.com",
+        q_provider_auto: "自动",
         q_btn: "查询",
         q_hint: "输入域名后点击查询",
         q_loading: "查询中...",
@@ -1284,6 +1475,9 @@ Content-Type: application/dns-message
         copy_code: "复制",
         prov_title: "DNS 提供商",
         prov_desc: "请求通过加权随机选择分配到以下提供商，并支持自动故障转移。",
+        copy_proxy_label: "代理地址：",
+        copy_proxy_url: "复制代理地址",
+        copy_origin_url: "复制原始地址",
         footer: "DoH 代理 — 由 Cloudflare Workers 驱动"
       }
     };
@@ -1319,6 +1513,7 @@ Content-Type: application/dns-message
     async function doQuery() {
       var domain = document.getElementById('q-domain').value.trim();
       var type   = document.getElementById('q-type').value;
+      var provider = document.getElementById('q-provider').value;
       var t      = i18nData[currentLang];
       if (!domain) { showToast(t.q_no_domain); return; }
 
@@ -1327,6 +1522,7 @@ Content-Type: application/dns-message
 
       try {
         var url  = '/dns-query?name=' + encodeURIComponent(domain) + '&type=' + encodeURIComponent(type);
+        if (provider) { url += '&provider=' + encodeURIComponent(provider); }
         var resp = await fetch(url, { headers: { 'Accept': 'application/dns-json' } });
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
         var data = await resp.json();
@@ -1378,17 +1574,34 @@ Content-Type: application/dns-message
     (function() {
       var providers = ${JSON.stringify(DOH_PROVIDERS)};
       var totalWeight = providers.reduce(function(s, p) { return s + (p.weight || 0); }, 0);
+      var baseUrl = new URL('${dnsEndpoint}').origin;
       var grid = document.getElementById('prov-grid');
       if (!grid) return;
       grid.innerHTML = providers.map(function(p) {
         var pct = totalWeight > 0 ? Math.round((p.weight / totalWeight) * 100) : 0;
+        var proxyUrl = baseUrl + '/' + p.slug + '/dns-query';
         return '<div class="prov-card">' +
           '<div class="prov-head"><span class="prov-name">' + escHtml(p.name) + '</span>' +
           '<span class="prov-weight">' + pct + '%</span></div>' +
           '<div class="prov-url">' + escHtml(p.url) + '</div>' +
-          '</div>';
+          '<div class="prov-proxy">' +
+          '<div class="prov-proxy-label">' + escHtml(i18nData[currentLang].copy_proxy_label) + '</div>' +
+          '<code class="prov-proxy-url">' + escHtml(proxyUrl) + '</code>' +
+          '<div class="prov-proxy-actions">' +
+          '<button class="prov-copy-btn" onclick="event.stopPropagation();copyProvUrl(this.dataset.url)" data-url="' + escHtml(proxyUrl) + '">' + escHtml(i18nData[currentLang].copy_proxy_url) + '</button>' +
+          '<button class="prov-copy-btn" onclick="event.stopPropagation();copyProvUrl(this.dataset.url)" data-url="' + escHtml(p.url) + '">' + escHtml(i18nData[currentLang].copy_origin_url) + '</button>' +
+          '</div></div></div>';
       }).join('');
     })();
+
+    /* ── Copy provider proxy URL ── */
+    function copyProvUrl(url) {
+      navigator.clipboard.writeText(url).then(function() {
+        showToast(i18nData[currentLang].copy_ep_ok);
+      }).catch(function() {
+        showToast(i18nData[currentLang].copy_fail);
+      });
+    }
 
     initThemeAndLang();
   </script>
@@ -1495,6 +1708,10 @@ function serveDNSEncodingExplanation() {
 
       <footer class="fade-up">
         <p data-i18n="footer">DoH Proxy — Powered by <span>Cloudflare Workers</span></p>
+        <a class="footer-github" href="https://github.com/PIKACHUIM/WorkerProxys" target="_blank" rel="noopener">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+          GitHub
+        </a>
       </footer>
     </div>
 
@@ -1588,6 +1805,178 @@ function handleCORS() {
             'Access-Control-Max-Age': '86400'
         }
     });
+}
+
+// ── DNS Binary Codec ──────────────────────────────────────────────────────
+// Build a DNS query in RFC 1035 wire format
+function buildDnsQuery(domain, type) {
+    const typeCode = DNS_TYPE_CODES[type] || 1;
+    const labels = domain.split('.');
+    let qnameLen = 0;
+    for (const label of labels) qnameLen += label.length + 1;
+    qnameLen += 1; // final zero octet
+
+    const buf = new ArrayBuffer(12 + qnameLen + 4);
+    const view = new DataView(buf);
+
+    // Header
+    view.setUint16(0, Math.floor(Math.random() * 65536)); // ID
+    view.setUint16(2, 0x0100); // Standard query, recursion desired
+    view.setUint16(4, 1); // QDCOUNT
+    view.setUint16(6, 0); // ANCOUNT
+    view.setUint16(8, 0); // NSCOUNT
+    view.setUint16(10, 0); // ARCOUNT
+
+    // QNAME
+    let offset = 12;
+    for (const label of labels) {
+        view.setUint8(offset++, label.length);
+        for (let i = 0; i < label.length; i++) {
+            view.setUint8(offset++, label.charCodeAt(i));
+        }
+    }
+    view.setUint8(offset++, 0);
+
+    // QTYPE + QCLASS
+    view.setUint16(offset, typeCode);
+    view.setUint16(offset + 2, 1); // IN
+
+    return buf;
+}
+
+// Read a domain name from DNS response (handles compression pointers)
+function readDnsName(view, bufLen, offset) {
+    const labels = [];
+    let jumped = false;
+    let jumpOffset = -1;
+
+    while (offset < bufLen) {
+        const len = view.getUint8(offset);
+        if (len === 0) {
+            offset++;
+            break;
+        }
+        if ((len & 0xC0) === 0xC0) {
+            if (!jumped) jumpOffset = offset + 2;
+            offset = ((len & 0x3F) << 8) | view.getUint8(offset + 1);
+            jumped = true;
+            continue;
+        }
+        offset++;
+        let label = '';
+        for (let i = 0; i < len; i++) {
+            label += String.fromCharCode(view.getUint8(offset++));
+        }
+        labels.push(label);
+    }
+
+    return { name: labels.join('.'), offset: jumped ? jumpOffset : offset };
+}
+
+// Read RDATA based on type
+function readRdata(view, bufLen, offset, type, rdlength) {
+    const end = offset + rdlength;
+    switch (type) {
+        case 1: { // A
+            if (rdlength !== 4) return '[invalid A]';
+            const p = [];
+            for (let i = 0; i < 4; i++) p.push(view.getUint8(offset + i));
+            return p.join('.');
+        }
+        case 28: { // AAAA
+            if (rdlength !== 16) return '[invalid AAAA]';
+            const p = [];
+            for (let i = 0; i < 16; i += 2) p.push(view.getUint16(offset + i).toString(16));
+            return p.join(':');
+        }
+        case 5: case 2: case 12: // CNAME, NS, PTR
+            return readDnsName(view, bufLen, offset).name;
+        case 15: { // MX
+            const pref = view.getUint16(offset);
+            return pref + ' ' + readDnsName(view, bufLen, offset + 2).name;
+        }
+        case 16: { // TXT
+            const strings = [];
+            let pos = offset;
+            while (pos < end) {
+                const slen = view.getUint8(pos); pos++;
+                let str = '';
+                for (let i = 0; i < slen && pos < end; i++) str += String.fromCharCode(view.getUint8(pos++));
+                strings.push(str);
+            }
+            return strings.join('');
+        }
+        case 6: { // SOA
+            const mn = readDnsName(view, bufLen, offset);
+            const rn = readDnsName(view, bufLen, mn.offset);
+            let pos = rn.offset;
+            const parts = [mn.name, rn.name];
+            for (let i = 0; i < 5; i++) { parts.push(view.getUint32(pos)); pos += 4; }
+            return parts.join(' ');
+        }
+        case 33: { // SRV
+            const pri = view.getUint16(offset);
+            const w = view.getUint16(offset + 2);
+            const port = view.getUint16(offset + 4);
+            const tgt = readDnsName(view, bufLen, offset + 6);
+            return pri + ' ' + w + ' ' + port + ' ' + tgt.name;
+        }
+        default:
+            return '[type ' + type + ']';
+    }
+}
+
+// Parse binary DNS response to JSON
+function parseDnsResponse(buffer) {
+    const view = new DataView(buffer);
+    const bufLen = buffer.byteLength;
+    let offset = 0;
+
+    // Header
+    offset += 2; // ID, skip
+    const flags = view.getUint16(offset); offset += 2;
+    const qdcount = view.getUint16(offset); offset += 2;
+    const ancount = view.getUint16(offset); offset += 2;
+    offset += 4; // nscount + arcount
+
+    const result = {
+        Status: flags & 0xF,
+        TC: !!(flags & 0x200),
+        RD: !!(flags & 0x100),
+        RA: !!(flags & 0x80),
+        AD: !!(flags & 0x20),
+        CD: !!(flags & 0x10),
+        Question: [],
+        Answer: []
+    };
+
+    // Skip questions
+    for (let i = 0; i < qdcount; i++) {
+        const q = readDnsName(view, bufLen, offset);
+        result.Question.push({ name: q.name, type: view.getUint16(q.offset) });
+        offset = q.offset + 4;
+    }
+
+    // Parse answers
+    for (let i = 0; i < ancount; i++) {
+        const ni = readDnsName(view, bufLen, offset);
+        offset = ni.offset;
+        const type = view.getUint16(offset); offset += 2;
+        offset += 2; // class
+        const ttl = view.getUint32(offset); offset += 4;
+        const rdlength = view.getUint16(offset); offset += 2;
+        const data = readRdata(view, bufLen, offset, type, rdlength);
+        offset += rdlength;
+        result.Answer.push({ name: ni.name, type: type, TTL: ttl, data: data });
+    }
+
+    return result;
+}
+// ── DNS Binary Codec END ──────────────────────────────────────────────────
+
+// Find a provider by its slug (case-insensitive)
+function findProviderBySlug(slug) {
+    return DOH_PROVIDERS.find(p => p.slug && p.slug.toLowerCase() === slug.toLowerCase());
 }
 
 // Weighted random selection of DoH provider
@@ -1900,6 +2289,10 @@ function generateBlockPage(countryCode) {
     </a>
 
     <div class="footer">POWERED BY CLOUDFLARE WORKERS</div>
+    <a class="footer-github" href="https://github.com/PIKACHUIM/WorkerProxys" target="_blank" rel="noopener" style="color:rgba(255,255,255,0.3);font-size:0.82rem;text-decoration:none;display:inline-flex;align-items:center;gap:6px;justify-content:center;margin-top:8px;">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
   </div>
 </body>
 </html>`;
